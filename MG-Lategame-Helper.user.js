@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.40
+// @version      0.15.41
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -28,7 +28,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.40';
+const MOD_VERSION = '0.15.41';
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
@@ -2882,11 +2882,14 @@ const SKIP_LABEL = { nolocal: '⛔ no local stock', refused: '⛔ not sold to yo
 // Storage ids (SeedSilo, ToolShack, DecorShed) and stack ids (uuid, else species/toolId/decorId) as QPM uses them
 // (ui/shop/restockAlerts, store/inventory.ts).
 // Put one bought item's stack(s) away: seeds → Seed Silo, tools → Tool Shack, decor → Decor Shed (if you have them)
-async function storeItem(i, tally) {
+async function storeItem(i, tally, waitMs = 1500) {
   const storageId = STORAGE_FOR[i.itemType];
   if (!storageId) return; // eggs etc. just stay in the inventory
+  const stacksOf = () => game.readStorage(settings.gardenOwner).items.filter((x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType));
+  // The purchase's answer can arrive before the game's state shows the new stack: wait for it, or it'd be left behind
+  if (waitMs && !stacksOf().length) await game.waitFor(() => stacksOf().length > 0, waitMs);
   const inv = game.readStorage(settings.gardenOwner);
-  const stacks = inv.items.filter((x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType));
+  const stacks = stacksOf();
   for (const x of stacks) {
     const stackId = x.id ?? x.species ?? x.toolId ?? x.decorId; // stacks without a uuid go by what they are
     if (!stackId) continue;
@@ -2894,6 +2897,26 @@ async function storeItem(i, tally) {
     const r = await net.send({ type: 'PutItemInStorage', itemId: stackId, storageId });
     if (r.ok) tally.moved++; else tally.kept++;
   }
+}
+// Seeds / tools / decor sitting in the inventory while their storage already holds that same kind (so putting them away
+// only adds to that stack and needs no free storage spot). Unique tools (the Strength Crystal etc.) are never included.
+const STACK_KEY = { Seed: 'species', Tool: 'toolId', Decor: 'decorId' };
+function leftoverStacks(inv = game.readStorage(settings.gardenOwner)) {
+  return inv.items.filter((x) => {
+    const sid = STORAGE_FOR[x.itemType], k = STACK_KEY[x.itemType];
+    if (!sid || !k || !x[k] || !inv.storages.includes(sid)) return false;
+    if (x.itemType === 'Tool' && (x.remainingActiveSeconds != null || (typeof x.id === 'string' && x.id))) return false;
+    return (inv.storageItems?.[sid] ?? []).some((y) => y[k] === x[k]);
+  });
+}
+async function putAwayLeftovers() {
+  let moved = 0, kept = 0;
+  for (const x of leftoverStacks()) {
+    const k = STACK_KEY[x.itemType];
+    const r = await net.send({ type: 'PutItemInStorage', itemId: x.id ?? x[k], storageId: STORAGE_FOR[x.itemType] });
+    if (r.ok) moved++; else kept++;
+  }
+  return { moved, kept };
 }
 // The always-visible 🛒 button: red with a count when there's something to buy and the mod can send; grey otherwise
 function updateShopFab() {
@@ -2957,8 +2980,12 @@ async function startShopBuy() {
     const off = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key })));
     return { shops, items, off, short, units: items.reduce((t, i) => t + i.left, 0), next, restocks: shops.map((sh) => sh.key + ':' + sh.restockId).join('|') };
   };
-  const shortHtml = (short) => !short?.length ? ''
-    : `<div class="refused"><b>Left out before buying:</b><ul>${short.map((s) => `<li>${esc(pretty(s.i.name))} ×${s.n}: ${esc(s.why)}</li>`).join('')}</ul></div>`;
+  const shortHtml = (short) => {
+    if (!short?.length) return '';
+    const noSlot = short.some((x) => x.why === 'no free inventory slot'), left = noSlot ? leftoverStacks().length : 0;
+    const used = noSlot ? game.readStorage(settings.gardenOwner).items.length : 0;
+    return `<div class="refused"><b>Left out before buying:</b><ul>${short.map((s) => `<li>${esc(pretty(s.i.name))} ×${s.n}: ${esc(s.why)}</li>`).join('')}</ul>${noSlot ? `<div class="muted">Inventory: ${used}/${INVENTORY_SLOTS} slots in use.</div>` : ''}${left ? `<button data-m="putaway" style="margin-top:6px">📦 Put away ${left} stack${left === 1 ? '' : 's'} already kept in your Seed Silo / Tool Shack / Decor Shed</button>` : ''}</div>`;
+  };
   const tileHtml = (i, off) => `<div class="buytile${off ? ' off' : ''}" data-buyoff="${esc(buyOffKey(i.shop, i.id))}" title="${esc(pretty(i.name))}: ${off ? 'switched off, click to buy it again' : 'click to switch it off (not bought)'}">${shopImg(i, 40)}<div class="bq">${off ? '⏸' : `×${i.left}`}</div><div class="bn">${esc(pretty(i.name))}</div>${dustCost(i) && !off ? `<div class="bd">✨ ${dustCost(i).toLocaleString()} dust each</div>` : ''}</div>`;
   const listHtml = ({ shops, items, off = [], units, short }) => `${items.length ? `<div>All of the stock you can take: <b>${units} purchases</b>. <span class="muted">Click an item to switch it on or off.</span></div>` : `<div class="muted">Nothing to buy right now.</div>`}${shortHtml(short)}
     ${items.length || off.length ? `<div class="buylist">${shops.map((sh) => [sh, items.filter((i) => i.shop === sh.key), off.filter((i) => i.shop === sh.key)]).filter(([, its, offs]) => its.length || offs.length).map(([sh, its, offs]) => `<div class="buyshop"><b>${esc(shopLabel(sh.key))}</b><div class="buytiles">${its.map((i) => tileHtml(i, false)).join('')}${offs.map((i) => tileHtml(i, true)).join('')}</div></div>`).join('')}</div>` : ''}`;
@@ -3019,6 +3046,12 @@ async function startShopBuy() {
     }
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.m === 'cancel' && !buying) return close();
+    if (b.dataset.m === 'putaway' && !buying && (e.isTrusted || TEST_BUILD)) {
+      b.disabled = true; b.textContent = 'Putting away…';
+      const r = await putAwayLeftovers(); await sleep(300);
+      now = { ...collect(), restocks: now.restocks }; refresh(`Put away ${r.moved} stack${r.moved === 1 ? '' : 's'}${r.kept ? ` (${r.kept} refused by the game)` : ''}.`); update(); updateShopFab();
+      return;
+    }
     if (b.dataset.m !== 'go' || b.disabled || buying || Date.now() < armedAt || !(e.isTrusted || TEST_BUILD)) return;
     // Buy what's in stock at the moment you press Buy
     now = collect();
@@ -3081,6 +3114,11 @@ async function runShopBuy(items, st) {
     };
     const queue = plan.slice();
     await Promise.all(Array.from({ length: WINDOW }, () => worker(queue)));
+    // Second pass: anything bought this run that is still in the inventory (e.g. its stack showed up late) goes away now
+    await sleep(400);
+    const again = { moved: 0, kept: 0 };
+    for (const i of items) if (unitsLeft.get(i.shop + ':' + i.id) < i.left) await storeItem(i, again, 0);
+    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved);
     const reasons = [...failedItems.values()].filter(Boolean);
     if (reasons.length) skippedText = `<div class="refused"><b>Not bought:</b><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
     stored = tally;
