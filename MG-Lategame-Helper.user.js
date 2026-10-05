@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.42
+// @version      0.15.43
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -28,7 +28,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.42';
+const MOD_VERSION = '0.15.43';
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
@@ -1053,6 +1053,20 @@ const ABILITY_NAMES = {
   ThunderstruckGranter: 'Thunderstruck Granter', Thundercharger: 'Thundercharger',
 };
 const pretty = (id) => ABILITY_NAMES[id] ?? liveNames[id] ?? String(id).replace(/_NEW$/, '').replace(/([a-z])(IV|I{1,3})$/, '$1 $2').replace(/([a-z])([A-Z])/g, '$1 $2');
+// Moving things between the inventory and a storage (Seed Silo, Tool Shack, Decor Shed, Pet Hutch). Since a game update
+// (seen 2026-10-05) this is one command, MoveItem { itemId, from, to }, with 'inventory' as one side; the old
+// PutItemInStorage / RetrieveItemFromStorage commands are answered "invalid_message". The old ones are still tried if
+// MoveItem itself is refused that way (an older game build), and whichever works is used from then on.
+let moveStyle = 'MoveItem';
+async function storageMove(itemId, from, to) {
+  const legacy = () => (to === 'inventory' ? { type: 'RetrieveItemFromStorage', itemId, storageId: from } : { type: 'PutItemInStorage', itemId, storageId: to });
+  const r = await net.send(moveStyle === 'MoveItem' ? { type: 'MoveItem', itemId, from, to } : legacy());
+  if (r.ok || r.code !== 'invalid_message') return r;
+  const other = moveStyle === 'MoveItem' ? legacy() : { type: 'MoveItem', itemId, from, to };
+  const r2 = await net.send(other);
+  if (r2.ok) moveStyle = other.type === 'MoveItem' ? 'MoveItem' : 'legacy';
+  return r2.ok ? r2 : r;
+}
 // Where a pet is: icon with a tooltip (copy-report text keeps the plain words)
 const LOC = { inventory: ['🎒', 'In your inventory'], hutch: ['🏠', 'In your pet hutch'], garden: ['🌱', 'Active — out in your garden'] };
 const locIcon = (loc) => `<span class="locic" title="${(LOC[loc] || [loc, loc])[1]}">${(LOC[loc] || ['?'])[0]}</span>`;
@@ -1952,7 +1966,7 @@ async function getSeeds(cropSp) {
   const hasStack = inv.items.some((x) => x?.itemType === 'Seed' && x.species === sp);
   if (!hasStack && inv.items.length >= INVENTORY_MAX) { logMsg = { ok: false, text: 'Your inventory is full, so the seeds can\'t come out of the silo.' }; render(); return; }
   for (const x of stacks) {
-    const r = await net.send({ type: 'RetrieveItemFromStorage', itemId: x.id ?? sp, storageId: 'SeedSilo' });
+    const r = await storageMove(x.id ?? sp, 'SeedSilo', 'inventory');
     if (!r.ok) { logMsg = { ok: false, text: `Couldn't take the ${pretty(sp)} seeds out of the silo (${r.reason || r.code}).` }; render(); return; }
   }
   logMsg = { ok: true, text: `${pretty(sp)} seeds are in your inventory now.` };
@@ -2029,7 +2043,7 @@ async function logPets() {
     for (let i = 0; i < bring.length; i++) {
       const p = bring[i];
       step(`Bringing out ${i + 1}/${bring.length}…`);
-      const r = await net.send({ type: 'RetrieveItemFromStorage', itemId: p.id, storageId: 'PetHutch' });
+      const r = await storageMove(p.id, 'PetHutch', 'inventory');
       if (!r.ok) { logMsg = { ok: false, text: `Couldn't take ${nameOnly(p)} out of the hutch (${r.reason || r.code}).` }; return; }
       movedForLog.add(p.id);
       if (!(await game.waitFor(inInv(p.id), 4000))) { logMsg = { ok: false, text: `${nameOnly(p)} didn't reach your inventory.` }; return; }
@@ -2065,7 +2079,7 @@ async function putBack(step = () => {}) {
     const id = ids[i];
     if (game.where(id, settings.gardenOwner) !== 'inventory') { movedForLog.delete(id); continue; }
     step(`Putting back ${i + 1}/${ids.length}…`);
-    const r = await net.send({ type: 'PutItemInStorage', itemId: id, storageId: 'PetHutch' });
+    const r = await storageMove(id, 'inventory', 'PetHutch');
     if (!r.ok) break;
     if (await game.waitFor(inHutchNow(id), 4000)) movedForLog.delete(id);
   }
@@ -2894,7 +2908,7 @@ async function storeItem(i, tally, waitMs = 1500) {
     const stackId = x.id ?? x.species ?? x.toolId ?? x.decorId; // stacks without a uuid go by what they are
     if (!stackId) continue;
     if (!inv.storages.includes(storageId)) { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `no ${storageId} found (storages seen: ${inv.storages.join(', ') || 'none'})`); continue; }
-    const r = await net.send({ type: 'PutItemInStorage', itemId: stackId, storageId });
+    const r = await storageMove(stackId, 'inventory', storageId);
     if (r.ok) tally.moved++; else { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `the game said "${r.reason || r.code}"`); }
   }
 }
@@ -2913,7 +2927,7 @@ async function putAwayLeftovers() {
   let moved = 0, kept = 0, why = null;
   for (const x of leftoverStacks()) {
     const k = STACK_KEY[x.itemType];
-    const r = await net.send({ type: 'PutItemInStorage', itemId: x.id ?? x[k], storageId: STORAGE_FOR[x.itemType] });
+    const r = await storageMove(x.id ?? x[k], 'inventory', STORAGE_FOR[x.itemType]);
     if (r.ok) moved++; else { kept++; why = r.reason || r.code; }
   }
   return { moved, kept, why };
@@ -3238,7 +3252,7 @@ async function putOutCrystal() {
   const plan = crystalPlan();
   if (!plan) return { ok: false, reason: "no picked-up Strength Crystal was found in your inventory or Tool Shack (shards are never placed)" };
   if (plan.from) {
-    const g = await net.send({ type: 'RetrieveItemFromStorage', itemId: plan.itemId, storageId: plan.from });
+    const g = await storageMove(plan.itemId, plan.from, 'inventory');
     if (!g.ok) return { ok: false, reason: `couldn't take it out of the ${plan.from} (${g.reason || g.code}); is your inventory full?` };
     await game.waitFor(() => game.readStorage(settings.gardenOwner).items.some((x) => x?.id === plan.itemId), 3000);
   }
@@ -3605,7 +3619,7 @@ async function startSell(ids) {
       if (!result.journalReadable || now.unlogged?.length) { status(p.id, 'not in your journal yet — skipped'); continue; }
       if (now.loc === 'hutch') {
         status(p.id, 'moving out of the hutch…');
-        const r = await net.send({ type: 'RetrieveItemFromStorage', itemId: p.id, storageId: 'PetHutch' });
+        const r = await storageMove(p.id, 'PetHutch', 'inventory');
         if (!r.ok) { status(p.id, `couldn't move it out of the hutch (${r.code})`, 'bad'); throw new Error(`Moving a pet out of the hutch failed (${r.code}). Is your inventory full?`); }
         const moved = await game.waitFor(arrivedIn(p.id, 'inventory'));
         if (!moved) { status(p.id, 'did not arrive in inventory', 'bad'); throw new Error('A pet did not arrive in your inventory.'); }
