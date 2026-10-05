@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.43
+// @version      0.15.44
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -28,7 +28,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.43';
+const MOD_VERSION = '0.15.44';
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
@@ -3090,7 +3090,7 @@ async function runShopBuy(items, st) {
     // Fast but polite: up to 16 commands in flight, at most ~40 a second (~100 purchases in about 2.5 s), well under
     // the ~300 per 10 s the server is understood to allow. Coins, dust and inventory space were already checked
     // (preflight), so nearly everything sent goes through. Every answer is matched to its own command: counts are exact.
-    // Each item is put away as soon as its last unit is bought, so the inventory never fills up mid-run.
+    // Each item is put away as soon as its units are bought.
     // A refused item is skipped (and remembered until the next restock); the run stops on connection problems,
     // or when 3 different items in a row are refused.
     const WINDOW = 16, GAP_MS = 25;
@@ -3100,39 +3100,52 @@ async function runShopBuy(items, st) {
     const unitsLeft = new Map(items.map((i) => [i.shop + ':' + i.id, i.left]));
     const tally = { moved: 0, kept: 0 };
     let refusedInARow = 0;
+    // Inventory slots: one worker per free slot (at most 16). Each worker buys one item at a time and puts its stack away
+    // before the next, so a new item's stack never needs more than that worker's slot. A worker whose stack can't be put
+    // away (eggs, or no storage for it) has used its slot up and stops. Units of one item go out in parallel.
+    const holds = (i) => game.readStorage(settings.gardenOwner).items.some((x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType));
+    const freeAtStart = Math.max(0, INVENTORY_SLOTS - game.readStorage(settings.gardenOwner).items.length);
+    const buyOne = async (i, key) => {
+      st.textContent = `Buying… ${done} of ${plan.length} done`;
+      // viewMode is required since game bundle 1292 (same fix as Arie's Mod); 'list' is what the shop's list view sends
+      const r = await paced({ type: 'PurchaseShopItem', shop: i.shop, item: { itemType: i.itemType, [i.idField]: i.id }, viewMode: 'list' });
+      if (r.ok) { refusedInARow = 0; done++; unitsLeft.set(key, unitsLeft.get(key) - 1); return true; }
+      if (failedItems.has(key)) return false;
+      const code = r.reason || r.code;
+      // No answer: that item is skipped (until its shop restocks) and the run goes on. The next command shows whether the
+      // numbering is fine (answered) or needs stepping down (invalid_sequence, handled in net.send).
+      if (r.code === 'timeout') { refusedThisRestock.add(refusalKey(i)); failedItems.set(key, `${pretty(i.name)}: no answer from the game (it may or may not have been bought; skipped until the next restock)`); return false; }
+      if (['not_ready', 'send_failed', 'blocked', 'rate_limited', 'invalid_sequence'].includes(r.code)) { stopped = stopped || `${pretty(i.name)}: ${code}`; return false; }
+      const why = explainRefusal(i, code);
+      failedItems.set(key, why ? `${pretty(i.name)}: ${why}` : null);
+      // a full inventory is temporary (the next press can buy it): not remembered for the restock
+      if (!/^inventory full/.test(why || '')) refusedThisRestock.add(refusalKey(i));
+      if (++refusedInARow >= 3) { stopped = stopped || `3 items in a row were refused${why ? ` (last: ${why})` : ''}`; }
+      return false;
+    };
+    const halted = () => !!stopped;
     const worker = async (queue) => {
-      while (queue.length && !stopped) {
+      while (queue.length && !halted()) {
         const i = queue.shift();
         const key = i.shop + ':' + i.id;
-        if (failedItems.has(key)) continue;
-        st.textContent = `Buying… ${done} of ${plan.length} done`;
-        // viewMode is required since game bundle 1292 (same fix as Arie's Mod); 'list' is what the shop's list view sends
-        const r = await paced({ type: 'PurchaseShopItem', shop: i.shop, item: { itemType: i.itemType, [i.idField]: i.id }, viewMode: 'list' });
-        if (!r.ok) {
-          const code = r.reason || r.code;
-          // No answer: that item is skipped (until its shop restocks) and the run goes on. The next command shows whether the
-          // numbering is fine (answered) or needs stepping down (invalid_sequence, handled in net.send).
-          if (r.code === 'timeout') { refusedThisRestock.add(refusalKey(i)); failedItems.set(key, `${pretty(i.name)}: no answer from the game (it may or may not have been bought; skipped until the next restock)`); continue; }
-          if (['not_ready', 'send_failed', 'blocked', 'rate_limited', 'invalid_sequence'].includes(r.code)) { stopped = `${pretty(i.name)}: ${code}`; break; }
-          const why = explainRefusal(i, code);
-          failedItems.set(key, why ? `${pretty(i.name)}: ${why}` : null);
-          refusedThisRestock.add(refusalKey(i));
-          if (++refusedInARow >= 3) { stopped = `3 items in a row were refused${why ? ` (last: ${why})` : ''}`; break; }
-          continue;
-        }
-        refusedInARow = 0;
-        done++;
-        const n = unitsLeft.get(key) - 1; unitsLeft.set(key, n);
-        if (n === 0) await storeItem(i, tally); // last unit of this item: put the stack away now
+        const isNew = !holds(i);
+        if (isNew && freeAtStart === 0) { failedItems.set(key, `${pretty(i.name)}: no free inventory slot (left for the next press)`); continue; }
+        // first unit alone (it makes the stack), then the rest together
+        if (await buyOne(i, key) && i.left > 1) await Promise.all(Array.from({ length: i.left - 1 }, () => (halted() || failedItems.has(key) ? false : buyOne(i, key))));
+        if (unitsLeft.get(key) < i.left) await storeItem(i, tally); // put the stack away now
+        if (isNew && holds(i)) return; // this worker's slot is taken by a stack that stays
       }
     };
-    const queue = plan.slice();
-    await Promise.all(Array.from({ length: WINDOW }, () => worker(queue)));
+    const queue = items.slice();
+    // Items you already hold need no slot: with no free slot at all, one worker still buys those
+    const workers = Math.max(1, Math.min(WINDOW, freeAtStart));
+    await Promise.all(Array.from({ length: workers }, () => worker(queue)));
+    for (const i of queue) { const key = i.shop + ':' + i.id; if (!failedItems.has(key) && !stopped) failedItems.set(key, `${pretty(i.name)}: no free inventory slot (left for the next press)`); }
     // Second pass: anything bought this run that is still in the inventory (e.g. its stack showed up late) goes away now
     await sleep(400);
     const again = { moved: 0, kept: 0 };
     for (const i of items) if (unitsLeft.get(i.shop + ':' + i.id) < i.left) await storeItem(i, again, 0);
-    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved); tally.why = again.why ?? (again.moved ? null : tally.why);
+    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved); tally.why = again.why ?? (again.moved ? null : tally.why); if (tally.why) tally.kept = tally.why.size;
     const reasons = [...failedItems.values()].filter(Boolean);
     if (reasons.length) skippedText = `<div class="refused"><b>Not bought:</b><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
     stored = tally;
