@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.41
+// @version      0.15.42
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -28,7 +28,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.41';
+const MOD_VERSION = '0.15.42';
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ const net = (() => {
             next = final + 1;
           }
           sentNum.set(env.requestId, Number(env.commandSequence));
-          note({ ev: 'send', n: Number(env.commandSequence), was: num, type: env.command.type, ours });
+          note({ ev: 'send', n: Number(env.commandSequence), was: num, type: env.command.type, ours, ...(/Storage/.test(env.command.type) ? { cmd: env.command } : {}) });
           if (sentNum.size > 500) sentNum.delete(sentNum.keys().next().value);
         }
       }
@@ -2893,9 +2893,9 @@ async function storeItem(i, tally, waitMs = 1500) {
   for (const x of stacks) {
     const stackId = x.id ?? x.species ?? x.toolId ?? x.decorId; // stacks without a uuid go by what they are
     if (!stackId) continue;
-    if (!inv.storages.includes(storageId)) { tally.kept++; continue; }
+    if (!inv.storages.includes(storageId)) { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `no ${storageId} found (storages seen: ${inv.storages.join(', ') || 'none'})`); continue; }
     const r = await net.send({ type: 'PutItemInStorage', itemId: stackId, storageId });
-    if (r.ok) tally.moved++; else tally.kept++;
+    if (r.ok) tally.moved++; else { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `the game said "${r.reason || r.code}"`); }
   }
 }
 // Seeds / tools / decor sitting in the inventory while their storage already holds that same kind (so putting them away
@@ -2910,13 +2910,13 @@ function leftoverStacks(inv = game.readStorage(settings.gardenOwner)) {
   });
 }
 async function putAwayLeftovers() {
-  let moved = 0, kept = 0;
+  let moved = 0, kept = 0, why = null;
   for (const x of leftoverStacks()) {
     const k = STACK_KEY[x.itemType];
     const r = await net.send({ type: 'PutItemInStorage', itemId: x.id ?? x[k], storageId: STORAGE_FOR[x.itemType] });
-    if (r.ok) moved++; else kept++;
+    if (r.ok) moved++; else { kept++; why = r.reason || r.code; }
   }
-  return { moved, kept };
+  return { moved, kept, why };
 }
 // The always-visible 🛒 button: red with a count when there's something to buy and the mod can send; grey otherwise
 function updateShopFab() {
@@ -3049,7 +3049,7 @@ async function startShopBuy() {
     if (b.dataset.m === 'putaway' && !buying && (e.isTrusted || TEST_BUILD)) {
       b.disabled = true; b.textContent = 'Putting away…';
       const r = await putAwayLeftovers(); await sleep(300);
-      now = { ...collect(), restocks: now.restocks }; refresh(`Put away ${r.moved} stack${r.moved === 1 ? '' : 's'}${r.kept ? ` (${r.kept} refused by the game)` : ''}.`); update(); updateShopFab();
+      now = { ...collect(), restocks: now.restocks }; refresh(`Put away ${r.moved} stack${r.moved === 1 ? '' : 's'}${r.kept ? ` (${r.kept} refused by the game: "${r.why}")` : ''}.`); update(); updateShopFab();
       return;
     }
     if (b.dataset.m !== 'go' || b.disabled || buying || Date.now() < armedAt || !(e.isTrusted || TEST_BUILD)) return;
@@ -3118,7 +3118,7 @@ async function runShopBuy(items, st) {
     await sleep(400);
     const again = { moved: 0, kept: 0 };
     for (const i of items) if (unitsLeft.get(i.shop + ':' + i.id) < i.left) await storeItem(i, again, 0);
-    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved);
+    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved); tally.why = again.why ?? (again.moved ? null : tally.why);
     const reasons = [...failedItems.values()].filter(Boolean);
     if (reasons.length) skippedText = `<div class="refused"><b>Not bought:</b><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
     stored = tally;
@@ -3127,7 +3127,8 @@ async function runShopBuy(items, st) {
     render();
   }
   return esc(stopped ? `Stopped: ${stopped}. Bought ${done} of ${plan.length}.` : `Bought ${done} of ${plan.length}.`)
-    + esc(stored && (stored.moved || stored.kept) ? ` Put away: ${stored.moved} stack${stored.moved === 1 ? '' : 's'}${stored.kept ? `, ${stored.kept} left in your inventory (no room or no storage for them)` : ''}.` : '') + skippedText;
+    + esc(stored && (stored.moved || stored.kept) ? ` Put away: ${stored.moved} stack${stored.moved === 1 ? '' : 's'}${stored.kept ? `, ${stored.kept} left in your inventory (no room or no storage for them)` : ''}.` : '')
+    + (stored?.why?.size ? `<div class="refused"><b>Not put away:</b><ul>${[...stored.why].map(([n, w]) => `<li>${esc(n)}: ${esc(w)}</li>`).join('')}</ul></div>` : '') + skippedText;
 }
 
 // ---------- Pity line-up alert (needs QPM's pity tracker) ----------
