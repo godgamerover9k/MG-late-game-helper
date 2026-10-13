@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.44
+// @version      0.15.49
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -28,7 +28,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.44';
+const MOD_VERSION = '0.15.49';
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
@@ -536,6 +536,11 @@ function analyzeRules(pets, OPTS) {
     'CoinFinderI', 'CoinFinderII', 'CoinFinderIII', 'CoinFinderIV', 'SnowyCoinFinder', 'DawnCoinFinder', 'ThunderCoinFinder', // coin finders: useless to you
     'SnowGranter', 'FrostGranter', // Chilled/Frozen potions are freely available in the Snow Shop
     'SeedFinderI', // only finds Common/Uncommon seeds, which the shop sells; Gold/Rainbow ones are still kept by the collection rules
+    'SnowyPetXpBoost', 'DawnXpBoost', 'ThunderXpBoost', 'AmberXpBoost', // weather XP boosters: only during their weather, not worth a slot
+    'SnowyPlantGrowthBoost', 'DawnPlantGrowthBoost', 'AmberPlantGrowthBoost', 'ThunderPlantGrowthBoost', // weather plant growth boosters: same
+    'SnowyEggGrowthBoost', 'ThunderEggGrowthBoost', 'AmberEggGrowthBoost', // weather egg growth boosters: same
+    'SnowyCropSizeBoost', 'SnowyCropMutationBoost', 'ThunderBoost', 'SnowyHungerBoost', 'SnowyHungerRestore', // other weather-only copies
+    // of a regular ability (Dawn Boost and Amber Moon Boost still count; granters and capture abilities aren't copies)
   ];
   const IGNORED = new Set(OPTS.ignored ?? DEFAULT_IGNORED);
   // Ignored abilities that still count on Gold/Rainbow pets (a Gold Seed Finder I worm has its uses)
@@ -882,9 +887,27 @@ function analyzeRules(pets, OPTS) {
       // Three-ability pets: one better pet with all three abilities is enough (it already does everything this one does)
       const tripleOne = tripleOn() && isTriple(p);
       const threshold = p.goldOnly || tripleOne ? 1 : ROLES[role].threshold + (extraCopy ? 1 : 0);
-      p.roles[role] = { beatenBy, deletable: beatenBy.length >= threshold, threshold };
+      let deletable = beatenBy.length >= threshold, perAbility = null;
+      // Optional (OPTS.perAbility): each ability is ranked on its own. Flagged when, for every ability of this use, at least
+      // `threshold` pets are better at that ability alone (they needn't have its other abilities). Ties: bigger, then older.
+      if (OPTS.perAbility && !deletable) {
+        perAbility = Object.fromEntries(roleCats(p, role).map(([c, v]) => [c, pets.filter((q) => q !== p && ((q.cats[c] ?? 0) > v + 1e-9
+          || (Math.abs((q.cats[c] ?? 0) - v) <= 1e-9 && (q.scale > p.scale || (q.scale === p.scale && (q.xp > p.xp || (q.xp === p.xp && q.id < p.id))))))).length]));
+        deletable = Object.values(perAbility).every((n) => n >= threshold);
+      }
+      p.roles[role] = { beatenBy, deletable, threshold, perAbility, byAbility: !!perAbility && deletable };
     }
     p.longTerm = !!p.roles.leaveOut;
+  }
+  // With per-ability ranking, a pet with 2+ useful abilities that no other pet beats at all of them together is kept: the
+  // best pet with that ability mix (only the copies below it go)
+  if (OPTS.perAbility) {
+    for (const p of pets) {
+    const useful = Object.entries(p.cats).filter(([c, v]) => v > 0 && c !== 'HARMFUL' && c !== 'GOLD granter' && c !== 'RAINBOW granter');
+    if (useful.length < 2 || p.betterThanMe.length || !Object.values(p.roles).some((x) => x.byAbility)) continue;
+    if (!Object.values(p.roles).every((x) => x.deletable)) continue;
+    p.bestMix = true;
+    }
   }
   const deletable = (p) => !(p.goldMatters && OPTS.protectLongTermGold !== false) && Object.values(p.roles).every((x) => x.deletable);
   
@@ -932,6 +955,7 @@ function analyzeRules(pets, OPTS) {
       if (!better) p.collection = 'three abilities';
     }
   }
+  for (const p of pets) if (OPTS.collectMix !== false && p.bestMix && deletable(p) && !p.named && !p.collection) p.collection = 'mix';
   const useless = pets.filter((p) => deletable(p) && !p.named && !p.collection);
   const savedByName = pets.filter((p) => deletable(p) && p.named);
   const savedByCollection = pets.filter((p) => p.collection);
@@ -962,6 +986,7 @@ const DEFAULT_SETTINGS = {
   collectThreeAbility: true, // keep every three-ability pet unless a better one of its species has the same abilities
   mutSameSpecies: false, // Gold/Rainbow pets are only compared with their own species
   collectUniqueMutated: true, // keep every good Gold/Rainbow: one best copy of each different ability mix per species
+  perAbility: false, // rank each ability on its own (better pets needn't share its other abilities); the best pet of each ability mix is kept
   extraCopies: true, // hunger pets and Rainbow pets: keep 3 (not 2) when left out
   goldNotUpgrade: true, // a Gold Granter pet doesn't replace a left-out pet without one
   maybeLooser: 1, // Maybe sell: this many fewer better pets needed
@@ -994,6 +1019,7 @@ const DEFAULT_SETTINGS = {
   tabOrder: [], // your tab order (empty = default)
   buyOff: [], // Buy everything: items you switched off ('shop:itemId')
   sellTeam: 'dust', // team the sell dialog swaps in: 'dust' (refund + dust boost) or 'refund'
+  storeOnlyKept: false, // Buy everything: put a purchase away only if its storage already holds that item (new kinds stay in the inventory)
   buyPotions: false, // Buy everything: also buy XP and Hunger potions with Magic Dust (no other dust item is ever bought)
   noLocalStock: ['Grape', 'Lemon', 'Lychee', 'Banana'], // seeds the game lists but doesn't sell you
   retiredEggs: ['WinterEgg', 'HorseEgg'], // eggs left out of the egg plan
@@ -1018,6 +1044,21 @@ const DEFAULT_SETTINGS = {
 };
 let settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
 if (settings.pityMutFactor === 0.77) settings.pityMutFactor = 0.7; // old default (too high), corrected
+// Abilities added to the default Ignored list later (weather-only copies of regular abilities, 0.15.48-49): each
+// is added once to an Ignored list saved before it joined, so removing one afterwards sticks
+{
+  const LATER = { ignoredWeatherXp: ['SnowyPetXpBoost', 'DawnXpBoost', 'ThunderXpBoost', 'AmberXpBoost'],
+    ignoredWeatherGrowth: ['SnowyPlantGrowthBoost', 'DawnPlantGrowthBoost', 'AmberPlantGrowthBoost', 'ThunderPlantGrowthBoost'],
+    ignoredWeatherEgg: ['SnowyEggGrowthBoost', 'ThunderEggGrowthBoost', 'AmberEggGrowthBoost'],
+    ignoredWeatherOther: ['SnowyCropSizeBoost', 'SnowyCropMutationBoost', 'ThunderBoost', 'SnowyHungerBoost', 'SnowyHungerRestore'] };
+  let changed = false;
+  for (const [flag, ids] of Object.entries(LATER)) {
+    if (settings[flag]) continue;
+    if (Array.isArray(settings.ignored)) settings.ignored = [...new Set([...settings.ignored, ...ids])];
+    settings[flag] = true; changed = true;
+  }
+  if (changed) { try { store.set('settings', settings); } catch {} }
+}
 // 0.14.7: Seed Finder I became ignored by default. A list you've customised gets it added once (untick to undo).
 if (Array.isArray(settings.ignored) && !settings.seedFinderMigrated) {
   settings.ignored = [...new Set([...settings.ignored, 'SeedFinderI'])];
@@ -1235,7 +1276,7 @@ function analyze() {
   // keep rules and pets on a best team stay out of it.
   const lax = analyzeRules(data.pets.map((p) => ({ ...p })), { ...opts,
     leaveOutThreshold: Math.max(1, (settings.leaveOutThreshold ?? 2) - (settings.maybeLooser ?? 1)), specificUseThreshold: Math.max(1, (settings.specificUseThreshold ?? 3) - (settings.maybeLooser ?? 1)),
-    collectMutations: false, collectThreeAbility: false, tripleCompare: settings.collectThreeAbility !== false, collectUniqueMutated: false, extraCopies: false, mutSameSpecies: false, protectLongTermGold: false });
+    collectMutations: false, collectThreeAbility: false, collectMix: false, tripleCompare: settings.collectThreeAbility !== false, collectUniqueMutated: false, extraCopies: false, mutSameSpecies: false, protectLongTermGold: false });
   const strictUseless = new Set(useless.map((p) => p.id));
   const roleWord = { leaveOut: 'left out', specificUse: 'specific use' };
   result.maybe = lax.useless.filter((lp) => !strictUseless.has(lp.id) && !onTeam.has(lp.id)).map((lp) => {
@@ -1809,7 +1850,7 @@ function detailsTables(p) {
     // Each of those abilities gets its own column.
     const cont = role === 'leaveOut';
     const nTied = x.beatenBy.filter((q) => mine.every((c) => Math.abs((q.cats[c] ?? 0) - (p.cats[c] ?? 0)) <= 1e-9)).length;
-    const verdict = `<div class="subh"><b>${esc(roleName[role])}:</b> ${orderAbilities([...new Set(mine.flatMap((c) => p.catAbilities?.[c] ?? []))]).map(abilityTag).join('')} — flagged when ${x.threshold ?? threshold[role]}+ pets beat it at ${mine.length === 1 ? 'this' : 'all of these'}: <b>${x.beatenBy.length} do</b> ${x.deletable ? '<span class="chip">flagged</span>' : '<span class="chip keep">kept</span>'}${nTied ? ` <span class="muted">(${nTied} tied, ranked above on size/XP)</span>` : ''}${cont ? ' <span class="muted">· only pets with at least as much stamina count</span>' : ''}${settings.collectThreeAbility !== false && p.abilities.filter((a) => a !== 'GoldGranter' && a !== 'RainbowGranter').length >= 3 ? ' <span class="muted">· three abilities: only pets with all three count, and one is enough</span>' : ''}</div>`;
+    const verdict = `<div class="subh"><b>${esc(roleName[role])}:</b> ${orderAbilities([...new Set(mine.flatMap((c) => p.catAbilities?.[c] ?? []))]).map(abilityTag).join('')} — flagged when ${x.threshold ?? threshold[role]}+ pets beat it at ${mine.length === 1 ? 'this' : 'all of these'}: <b>${x.beatenBy.length} do</b> ${x.deletable ? '<span class="chip">flagged</span>' : '<span class="chip keep">kept</span>'}${x.perAbility ? ` <span class="muted">· each ability on its own: ${mine.map((c) => `${esc(catLabel(c))} ${x.perAbility[c] ?? 0} better`).join(', ')}${x.byAbility ? ' (flagged this way)' : ''}</span>` : ''}${nTied ? ` <span class="muted">(${nTied} tied, ranked above on size/XP)</span>` : ''}${cont ? ' <span class="muted">· only pets with at least as much stamina count</span>' : ''}${settings.collectThreeAbility !== false && p.abilities.filter((a) => a !== 'GoldGranter' && a !== 'RainbowGranter').length >= 3 ? ' <span class="muted">· three abilities: only pets with all three count, and one is enough</span>' : ''}</div>`;
     // The abilities being compared come first on every row (in the same order), so they line up in a column
     const comparedFirst = (q) => {
       const first = mine.flatMap((c) => orderAbilities(q.catAbilities?.[c] ?? []));
@@ -1831,6 +1872,7 @@ function detailsTables(p) {
 
 // Why a pet is kept for your collection, in words
 const collectionWhy = (p) => p.collection === 'three abilities' ? 'best three-ability pet of its kind'
+  : p.collection === 'mix' ? 'best pet with this ability mix (no pet beats it at all of them)'
   : String(p.collection).startsWith('only ') ? String(p.collection).replace(/with (\w+)$/, (_, a) => 'with ' + pretty(a))
   : `your best ${p.collection} ${p.species}`;
 function renderKept(bar, body) {
@@ -2574,6 +2616,7 @@ function renderSettings(bar, body) {
     <details data-sec="useless"${secOpen('useless')}><summary><b>When is a pet useless?</b></summary>
       ${num('leaveOutThreshold', 'Better pets needed (long-term abilities)')}
       ${num('specificUseThreshold', 'Better pets needed (one-time abilities)')}
+      ${chk('perAbility', 'Compare each ability on its own: a pet goes when enough pets beat it at each of its abilities, even different pets for each (the best pet with each ability mix is kept)')}
       ${chk('extraCopies', 'One more for hunger pets and Rainbows (all three can be out)')}
       ${chk('crystal', 'Count the Strength Crystal (+10 STR)')}
       ${chk('goldNotUpgrade', "Gold Granter doesn't make a pet better")}
@@ -2616,6 +2659,7 @@ function renderSettings(bar, body) {
       ${list('retiredEggs', 'Eggs left out of the egg plan:')}</details>
     <details data-sec="shop"${secOpen('shop')}><summary><b>🛒 Shop</b></summary>
       ${chk('buyPotions', 'Also buy XP and Hunger potions (Magic Dust)')}
+      ${chk('storeOnlyKept', 'Put purchases away only if that item is already in its storage (Seed Silo / Tool Shack / Decor Shed); others stay in the inventory')}
       <div class="muted">Never bought: buildings, one-time items, other Magic Dust items.</div>
       ${list('noLocalStock', 'No local stock:')}</details>
     <details data-sec="display"${secOpen('display')}><summary><b>Buttons and display</b></summary>
@@ -2862,7 +2906,7 @@ function preflight(items, inv = game.readStorage(settings.gardenOwner)) {
     // …unless that storage is full and has no stack of it yet: then it stays in the inventory
     const sid = STORAGE_FOR[i.itemType], inStore = (inv.storageItems?.[sid] ?? []).some((x) => x[i.idField] === i.id);
     const storeFree = inv.storageFree ?? {};
-    const putAway = inv.storages.includes(sid) && (inStore || (storeFree[sid] ?? Infinity) > 0);
+    const putAway = inv.storages.includes(sid) && (inStore || (!settings.storeOnlyKept && (storeFree[sid] ?? Infinity) > 0));
     if (!hasStack && freeSlots < 1) { short.push({ i, n: i.left, why: 'no free inventory slot' }); continue; }
     const price = Number(shopMeta(i)?.coinPrice) || i.price || 0; // 0 = price unknown: left for the game to decide
     const dPrice = dustCost(i);
@@ -2896,6 +2940,18 @@ const SKIP_LABEL = { nolocal: '⛔ no local stock', refused: '⛔ not sold to yo
 // Storage ids (SeedSilo, ToolShack, DecorShed) and stack ids (uuid, else species/toolId/decorId) as QPM uses them
 // (ui/shop/restockAlerts, store/inventory.ts).
 // Put one bought item's stack(s) away: seeds → Seed Silo, tools → Tool Shack, decor → Decor Shed (if you have them)
+// Storages that turned down an item (e.g. the Tool Shack's Watering Can stack is at its limit): not tried again for that
+// item until that storage's contents change. Remembered per item with a snapshot of the storage.
+const storeFull = new Map();
+const storageSig = (inv, sid) => JSON.stringify((inv.storageItems?.[sid] ?? []).map((x) => [x.id ?? x.species ?? x.toolId ?? x.decorId, x.quantity ?? 1]));
+function storageFullFor(i, inv = game.readStorage(settings.gardenOwner)) {
+  const sid = STORAGE_FOR[i.itemType]; if (!sid || !inv.storages.includes(sid)) return false;
+  const max = Number(shopMeta(i)?.max) || CARRY_MAX[i.id] || 0;
+  const inStore = (inv.storageItems?.[sid] ?? []).find((x) => x[i.idField] === i.id);
+  if (max && inStore && (Number(inStore.quantity) || 1) >= max) return true;
+  const k = storeFull.get(i.itemType + ':' + i.id);
+  return !!k && k === storageSig(inv, sid);
+}
 async function storeItem(i, tally, waitMs = 1500) {
   const storageId = STORAGE_FOR[i.itemType];
   if (!storageId) return; // eggs etc. just stay in the inventory
@@ -2908,8 +2964,13 @@ async function storeItem(i, tally, waitMs = 1500) {
     const stackId = x.id ?? x.species ?? x.toolId ?? x.decorId; // stacks without a uuid go by what they are
     if (!stackId) continue;
     if (!inv.storages.includes(storageId)) { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `no ${storageId} found (storages seen: ${inv.storages.join(', ') || 'none'})`); continue; }
+    const full = `${pretty(storageId)} is full for it; it stays in your inventory`;
+    if (storageFullFor(i, inv)) { (tally.full ??= new Map()).set(pretty(i.name), full); continue; }
+    if (settings.storeOnlyKept && !(inv.storageItems?.[storageId] ?? []).some((y) => y[i.idField] === i.id)) { (tally.full ??= new Map()).set(pretty(i.name), `not in your ${pretty(storageId)} yet; it stays in your inventory`); continue; }
     const r = await storageMove(stackId, 'inventory', storageId);
-    if (r.ok) tally.moved++; else { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `the game said "${r.reason || r.code}"`); }
+    if (r.ok) tally.moved++;
+    else if (r.code === 'rejected') { storeFull.set(i.itemType + ':' + i.id, storageSig(game.readStorage(settings.gardenOwner), storageId)); (tally.full ??= new Map()).set(pretty(i.name), full); }
+    else { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `the game said "${r.reason || r.code}"`); }
   }
 }
 // Seeds / tools / decor sitting in the inventory while their storage already holds that same kind (so putting them away
@@ -2920,6 +2981,7 @@ function leftoverStacks(inv = game.readStorage(settings.gardenOwner)) {
     const sid = STORAGE_FOR[x.itemType], k = STACK_KEY[x.itemType];
     if (!sid || !k || !x[k] || !inv.storages.includes(sid)) return false;
     if (x.itemType === 'Tool' && (x.remainingActiveSeconds != null || (typeof x.id === 'string' && x.id))) return false;
+    if (storageFullFor({ itemType: x.itemType, idField: k, id: x[k] }, inv)) return false;
     return (inv.storageItems?.[sid] ?? []).some((y) => y[k] === x[k]);
   });
 }
@@ -2974,7 +3036,7 @@ function shopRulesText() {
     `Buildings, one-time items (Shovel, Camera, …) and ${settings.buyPotions ? 'other ' : ''}Magic Dust items are never bought.`,
     'Click an item to switch it off (greyed out, not bought) or back on; this is remembered across restocks.',
     'Your coins, dust and free inventory slots are checked first; anything that won\'t fit is listed and not sent.',
-    'Each item goes into your Seed Silo / Tool Shack / Decor Shed (if you have them) as soon as it\'s bought.',
+    settings.storeOnlyKept ? 'Each item goes into your Seed Silo / Tool Shack / Decor Shed as soon as it\'s bought, if that storage already holds it; new kinds stay in your inventory.' : 'Each item goes into your Seed Silo / Tool Shack / Decor Shed (if you have them) as soon as it\'s bought.',
     'A refused item is skipped and left alone until that shop restocks. This window can stay open: after each restock, press Buy again.',
   ].filter(Boolean).join(' ');
 }
@@ -3145,7 +3207,7 @@ async function runShopBuy(items, st) {
     await sleep(400);
     const again = { moved: 0, kept: 0 };
     for (const i of items) if (unitsLeft.get(i.shop + ':' + i.id) < i.left) await storeItem(i, again, 0);
-    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved); tally.why = again.why ?? (again.moved ? null : tally.why); if (tally.why) tally.kept = tally.why.size;
+    tally.moved += again.moved; tally.kept = Math.max(0, tally.kept - again.moved); tally.why = again.why ?? (again.moved ? null : tally.why); if (tally.why) tally.kept = tally.why.size; if (again.full) tally.full = new Map([...(tally.full ?? []), ...again.full]);
     const reasons = [...failedItems.values()].filter(Boolean);
     if (reasons.length) skippedText = `<div class="refused"><b>Not bought:</b><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
     stored = tally;
@@ -3155,6 +3217,7 @@ async function runShopBuy(items, st) {
   }
   return esc(stopped ? `Stopped: ${stopped}. Bought ${done} of ${plan.length}.` : `Bought ${done} of ${plan.length}.`)
     + esc(stored && (stored.moved || stored.kept) ? ` Put away: ${stored.moved} stack${stored.moved === 1 ? '' : 's'}${stored.kept ? `, ${stored.kept} left in your inventory (no room or no storage for them)` : ''}.` : '')
+    + (stored?.full?.size ? `<div class="muted">${[...stored.full].map(([n, w]) => `${esc(n)}: ${esc(w)}.`).join(' ')}</div>` : '')
     + (stored?.why?.size ? `<div class="refused"><b>Not put away:</b><ul>${[...stored.why].map(([n, w]) => `<li>${esc(n)}: ${esc(w)}</li>`).join('')}</ul></div>` : '') + skippedText;
 }
 
