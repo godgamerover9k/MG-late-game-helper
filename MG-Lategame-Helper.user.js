@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.49
+// @version      0.15.50
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -28,7 +28,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.49';
+const MOD_VERSION = '0.15.50';
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
@@ -1111,10 +1111,10 @@ async function storageMove(itemId, from, to) {
 // Where a pet is: icon with a tooltip (copy-report text keeps the plain words)
 const LOC = { inventory: ['🎒', 'In your inventory'], hutch: ['🏠', 'In your pet hutch'], garden: ['🌱', 'Active — out in your garden'] };
 const locIcon = (loc) => `<span class="locic" title="${(LOC[loc] || [loc, loc])[1]}">${(LOC[loc] || ['?'])[0]}</span>`;
-const nameOnly = (p) => `${p.species}${p.mutations.length ? ' (' + p.mutations.join('/') + ')' : ''}`;
+const nameOnly = (p) => `${speciesName(p.species)}${p.mutations.length ? ' (' + p.mutations.join('/') + ')' : ''}`;
 // Max STR in bold; if the pet is still growing, its current STR sits in front, like the game shows it (62/92)
 const strCell = (p) => (p.curStr != null && p.baseStr != null && p.curStr < p.baseStr ? `<span class="cstr" title="Current STR ${p.curStr} — grows to ${p.baseStr}">${p.curStr}/</span>` : '') + `<b class="str">${p.baseStr ?? '?'}</b>`;
-const label = (p) => `${p.species}${p.mutations.length ? ' (' + p.mutations.join('/') + ')' : ''} · max STR ${p.baseStr}`; // in-game max strength (the crystal bonus is only used in the comparison maths)
+const label = (p) => `${speciesName(p.species)}${p.mutations.length ? ' (' + p.mutations.join('/') + ')' : ''} · max STR ${p.baseStr}`; // in-game max strength (the crystal bonus is only used in the comparison maths)
 
 
 // Ability badge colours, as the game shows them (from Arie's Mod's mapping); first matching prefix wins
@@ -1153,19 +1153,33 @@ const orderAbilities = (list) => {
 const abilityTags = (p) => orderAbilities(p.abilities).map((a) => abilityTag(a, p)).join('');
 // Ignored abilities are shown dimmed and struck through
 const abilityTag = (a, p) => isIgnoredAbility(a, p)
-  ? `<span class="tag ab ign" style="background:${abilityColor(a)}" title="Doesn't count: ignored in your settings">${esc(pretty(a))}</span>`
-  : `<span class="tag ab" style="background:${abilityColor(a)}">${esc(pretty(a))}</span>`;
+  ? `<span class="tag ab ign" style="background:${abilityColor(a)}" title="${esc(abilityDesc(a))}${abilityDesc(a) ? '\n' : ''}Doesn't count: ignored in your settings">${esc(pretty(a))}</span>`
+  : `<span class="tag ab" style="background:${abilityColor(a)}" title="${esc(abilityDesc(a))}">${esc(pretty(a))}</span>`;
+// What an ability does, from the game's own text (live data); a short built-in line where the game has none
+const ABILITY_DESC_FALLBACK = { ProduceScaleBoost: 'Chance to make a garden crop bigger', ProduceScaleBoostII: 'Chance to make a garden crop bigger', ProduceScaleBoostIII: 'Chance to make a garden crop bigger', SnowyCropSizeBoost: 'Chance to make a garden crop bigger during Snow' };
+const abilityDesc = (a) => {
+  const d = unwrapLive(liveData?.abilities)?.[a];
+  let t = typeof d?.description === 'string' ? d.description : ABILITY_DESC_FALLBACK[a] ?? '';
+  const toks = Array.isArray(d?.descriptionTokens) ? d.descriptionTokens : [];
+  t = t.replace(/<(\d+)\s*\/>/g, (_, i) => { const k = toks[+i]; return k == null ? '' : typeof k === 'string' ? k : String(k.value ?? k.mutation ?? k.name ?? k.text ?? k.id ?? Object.entries(k).find(([key, v]) => key !== 'type' && typeof v === 'string')?.[1] ?? ''); });
+  return t.replace(/\s+/g, ' ').trim();
+};
 
 // Pet picture from the community sprite server, with Gold/Rainbow applied. Discord's activity frame blocks outside
 // images, so there (or if the image fails) it shows the species' initials instead.
 const IS_DISCORD = /discordsays\.com$/.test(location.hostname);
 const initials = (p) => esc(p.species.replace(/[^A-Z]/g, '').slice(0, 2) || p.species.slice(0, 2));
+// The sprite server names some species with spaces ("Red Fox" for RedFox): its name from the live data, else spaced out
+const speciesName = (sp) => { const d = unwrapLive(liveData?.pets)?.[sp]; return typeof d?.name === 'string' ? d.name : String(sp).replace(/([a-z])([A-Z])/g, '$1 $2'); };
 const petImg = (p, size = 40) => {
   const mut = p.mutations.filter((m) => m === 'Gold' || m === 'Rainbow');
   const fb = `<span class="pimg fb" style="width:${size}px;height:${size}px">${initials(p)}</span>`;
   if (IS_DISCORD) return fb;
-  const url = `https://mg-api.ariedam.fr/assets/sprites/composed?key=${encodeURIComponent('sprite/pet/' + p.species)}${mut.length ? '&mutations=' + encodeURIComponent(mut.join(',')) : ''}`;
-  return `<span class="pimg" style="width:${size}px;height:${size}px"><img src="${url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentNode.classList.add('fb');this.parentNode.textContent='${initials(p)}'"></span>`;
+  const composed = (key) => `https://mg-api.ariedam.fr/assets/sprites/composed?key=${encodeURIComponent('sprite/pet/' + key)}${mut.length ? '&mutations=' + encodeURIComponent(mut.join(',')) : ''}`;
+  const name = speciesName(p.species);
+  // tried in order: by id, by name, then the plain picture (no Gold/Rainbow tint), then the initials
+  const urls = [...new Set([composed(p.species), composed(name), `https://mg-api.ariedam.fr/assets/sprites/pets/${encodeURIComponent(name)}.png`])];
+  return `<span class="pimg" style="width:${size}px;height:${size}px"><img src="${urls[0]}" data-next="${esc(urls.slice(1).join('|'))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="var n=(this.dataset.next||'').split('|').filter(Boolean);if(n.length){this.dataset.next=n.slice(1).join('|');this.src=n[0];}else{this.parentNode.classList.add('fb');this.parentNode.textContent='${initials(p)}';}"></span>`;
 };
 
 
@@ -1251,7 +1265,7 @@ function analyze() {
   const r = analyzeRules(data.pets.map((p) => ({ ...p })), opts);
   // Your own filters on top of the model: pinned pets, always-keep species/abilities
   const keepBecause = (p) => settings.pinned.includes(p.id) ? 'you pinned it'
-    : settings.keepSpecies.includes(p.species) ? `you keep all ${p.species}`
+    : settings.keepSpecies.includes(p.species) ? `you keep all ${speciesName(p.species)}`
     : p.abilities.find((a) => settings.keepAbilities.includes(a)) ? `you keep ${pretty(p.abilities.find((a) => settings.keepAbilities.includes(a)))}` : null;
   const useless = [], keptByYou = [];
   for (const p of r.useless) { const why = keepBecause(p); if (why) keptByYou.push({ p, why }); else useless.push(p); }
@@ -1829,7 +1843,7 @@ function renderUseless(bar, body) {
 function details(p) {
   const notes = [];
   const keptGold = p.mutations.includes('Gold') && result.savedByCollection.find((q) => q.species === p.species && q.collection === 'Gold' && q.id !== p.id);
-  if (keptGold) notes.push(`Your collection's Gold ${p.species} is kept: ${label(keptGold)} (${(LOC[keptGold.loc] || [keptGold.loc, keptGold.loc])[1].toLowerCase()}).`);
+  if (keptGold) notes.push(`Your collection's Gold ${speciesName(p.species)} is kept: ${label(keptGold)} (${(LOC[keptGold.loc] || [keptGold.loc, keptGold.loc])[1].toLowerCase()}).`);
   const noteHtml = notes.map((n) => `<div class="dnote">ℹ ${esc(n)}</div>`).join('');
   return noteHtml + detailsTables(p);
 }
@@ -1874,7 +1888,7 @@ function detailsTables(p) {
 const collectionWhy = (p) => p.collection === 'three abilities' ? 'best three-ability pet of its kind'
   : p.collection === 'mix' ? 'best pet with this ability mix (no pet beats it at all of them)'
   : String(p.collection).startsWith('only ') ? String(p.collection).replace(/with (\w+)$/, (_, a) => 'with ' + pretty(a))
-  : `your best ${p.collection} ${p.species}`;
+  : `your best ${p.collection} ${speciesName(p.species)}`;
 function renderKept(bar, body) {
   const ready = net.readiness(true);
   const rows = [
@@ -3347,7 +3361,7 @@ function taskWarnings(task) {
   const out = [];
   if (!crystalOut()) out.push("your Strength Crystal isn't out (no +10 STR)");
   const idle = idleForTask(task);
-  if (idle.length) out.push(`${idle.map((p) => `${p.species} (${p.abilities.map(pretty).join(', ') || 'no abilities'})`).join(', ')} ${idle.length === 1 ? 'is' : 'are'} out but ${idle.length === 1 ? "doesn't" : "don't"} help with ${TASK_NAME[task]}`);
+  if (idle.length) out.push(`${idle.map((p) => `${speciesName(p.species)} (${p.abilities.map(pretty).join(', ') || 'no abilities'})`).join(', ')} ${idle.length === 1 ? 'is' : 'are'} out but ${idle.length === 1 ? "doesn't" : "don't"} help with ${TASK_NAME[task]}`);
   return out;
 }
 const lastTaskToast = {};
@@ -3535,7 +3549,7 @@ function hatchTeamBtns() {
 }
 function showHatchPrompt(issues) {
   const m = document.createElement('div'); m.id = 'mgpc-crystal';
-  const idleText = issues.idle ? issues.idle.map((p) => `${p.species} (${p.abilities.map(pretty).join(', ') || 'no abilities'})`).join(', ') : '';
+  const idleText = issues.idle ? issues.idle.map((p) => `${speciesName(p.species)} (${p.abilities.map(pretty).join(', ') || 'no abilities'})`).join(', ') : '';
   m.innerHTML = `<div class="card">
     <div class="big">${issues.crystal ? "💎 Your Strength Crystal isn't out!" : "🐾 Some pets out don't help hatching!"}</div>
     <div>The hatch was stopped.</div>

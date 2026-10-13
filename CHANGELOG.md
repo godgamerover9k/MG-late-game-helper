@@ -1,5 +1,9 @@
 # MG Lategame Helper: changelog
 
+## 0.15.50
+- Hovering an ability shows what it does (the game's own description; a short built-in line where the game has none), and whether it's ignored in your settings.
+- Species with spaces in their name (Red Fox, …) show their picture and their spaced name: the picture is looked up by the game's name when the id doesn't match, then the plain picture, then the initials.
+
 ## 0.15.49
 - The other weather-only copies of regular abilities joined the default Ignored abilities list, added once to a saved list the same way: Snowy, Thunder and Amber Egg Growth Boost; Snowy Crop Size Boost; Snowy Crop Mutation Boost and Thunder Boost; Snowy Hunger Boost and Snowy Hunger Restore. Dawn Boost and Amber Moon Boost still count; granters (Thunderstruck, Dawnlit, Amberlit) and capture abilities aren't copies and still count.
 
