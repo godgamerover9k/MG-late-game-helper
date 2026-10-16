@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.15.50
+// @version      0.16.1
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -23,16 +23,97 @@
 //  - Arie's Mod / Ariedam64 (https://github.com/Ariedam64): live game data and sprites from mg-api.ariedam.fr,
 //    ability badge colours, the PurchaseShopItem viewMode fix (mg-afk-android) and the LogItem target format
 //    (MG-Websocket-Helper).
+//  - Phone remote messages go through ntfy.sh (https://ntfy.sh), a free public message relay.
 //  - Everything else (the pet rules, teams, planner and UI) is this mod's own.
 
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.15.50';
+const MOD_VERSION = '0.16.1';
+const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+// ---------------------------------------------------------------------------
+// Phone ↔ PC relay (📱 Phone remote). Messages go through ntfy.sh, a free public message relay: the PC mod and the
+// phone both listen on one secret topic (the pairing code). Only short JSON lines prefixed "mglh1 " are sent: commands
+// from the phone (buy / reconnect / ping) and the PC's status. Anyone who knows the code could press Buy for you, so
+// it's long and random; "New code" on the PC replaces it.
+// ---------------------------------------------------------------------------
+const RELAY = 'https://ntfy.sh';
+const RELAY_PREFIX = 'mglh1 ';
+const relay = {
+  newCode() {
+    const abc = 'abcdefghijkmnpqrstuvwxyz23456789';
+    const r = new Uint32Array(14); crypto.getRandomValues(r);
+    return 'mglh-' + [...r].map((x) => abc[x % abc.length]).join('');
+  },
+  valid: (code) => typeof code === 'string' && /^mglh-[a-z0-9]{8,40}$/.test(code),
+  // One message to the topic (text body: no browser preflight needed)
+  async send(code, obj) {
+    if (!relay.valid(code)) return false;
+    try { const r = await fetch(`${RELAY}/${code}`, { method: 'POST', body: RELAY_PREFIX + JSON.stringify(obj) }); return r.ok; } catch { return false; }
+  },
+  // A notification for the ntfy phone app (topic "<code>-a"), optionally with action buttons that send a command back
+  async notify(code, { title, message, priority = 3, tags = [], actions = [] }) {
+    if (!relay.valid(code)) return false;
+    try {
+      const body = JSON.stringify({ topic: code + '-a', title, message, priority, tags, actions });
+      const r = await fetch(`${RELAY}/`, { method: 'POST', body });
+      return r.ok;
+    } catch { return false; }
+  },
+  // The last messages (since = '2m', '1h', or a message id), oldest first
+  async poll(code, since = '2m') {
+    if (!relay.valid(code)) return [];
+    try {
+      const r = await fetch(`${RELAY}/${code}/json?poll=1&since=${encodeURIComponent(since)}`);
+      if (!r.ok) return [];
+      return (await r.text()).split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((m) => m?.event === 'message').map(relay.parse).filter(Boolean);
+    } catch { return []; }
+  },
+  parse(m) {
+    if (typeof m?.message !== 'string' || !m.message.startsWith(RELAY_PREFIX)) return null;
+    try { return { id: m.id, time: m.time, ...JSON.parse(m.message.slice(RELAY_PREFIX.length)) }; } catch { return null; }
+  },
+  // Keep listening (a long-lived stream that reconnects by itself). Returns a stop function.
+  listen(code, onMsg, since = '1m') {
+    const st = { stopped: false }; let ctrl = null, last = since, wait = 2000;
+    const loop = async () => {
+      while (!st.stopped) {
+        try {
+          ctrl = new AbortController();
+          const r = await fetch(`${RELAY}/${code}/json?since=${encodeURIComponent(last)}`, { signal: ctrl.signal });
+          if (!r.ok || !r.body) throw new Error('relay ' + r.status);
+          wait = 2000;
+          const reader = r.body.getReader(), dec = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done || st.stopped) break;
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+              const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+              let m = null; try { m = JSON.parse(line); } catch {}
+              if (m?.event !== 'message') continue;
+              last = m.id;
+              const p = relay.parse(m);
+              if (p) { try { onMsg(p); } catch (e) { console.error('[mglh relay]', e); } }
+            }
+          }
+        } catch (e) { if (st.stopped) break; }
+        if (st.stopped) break;
+        const pause = wait; wait = Math.min(60000, wait * 2);
+        await new Promise((res) => setTimeout(res, pause));
+      }
+    };
+    if (relay.valid(code)) loop();
+    return () => { st.stopped = true; try { ctrl?.abort(); } catch {} };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Core: storage, command channel (socket hook), live game state
 // ---------------------------------------------------------------------------
-const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+// (W is defined above)
 if (W.__mgPetCuller) return;
 W.__mgPetCuller = true;
 const LOG = (...a) => console.log('%c[Lategame Helper]', 'color:#5bbf73;font-weight:bold', ...a);
@@ -1019,6 +1100,17 @@ const DEFAULT_SETTINGS = {
   tabOrder: [], // your tab order (empty = default)
   buyOff: [], // Buy everything: items you switched off ('shop:itemId')
   sellTeam: 'dust', // team the sell dialog swaps in: 'dust' (refund + dust boost) or 'refund'
+  featRemote: false, // 📱 Phone remote: the phone can press Buy (and Reconnect) on this PC through the relay
+  remoteCode: null, // pairing code (secret relay topic), made when the remote is first switched on
+  remoteAlerts: true, // rare alerts and Buy results also go to the ntfy phone app (topic <code>-a)
+  featRareAlert: true, // 🔔 alert when a rare item is in a shop
+  rareAlertMin: 'Divine', // lowest rarity that alerts: Mythic / Divine / Celestial
+  rareAlertSound: true, // chime with the alert
+  rareAlertRepeat: 'once', // 'once' = one alert per item per restock; 'repeat' = again every rareAlertEvery s until bought
+  rareAlertEvery: '15', // seconds between repeats
+  rareAlertVolume: 60, // chime volume, 0-100
+  rareAlertDesktop: false, // also a system notification (asks the browser for permission)
+  rareAlertPick: {}, // your own picks: item id -> true (always alert) / false (never); unpicked items follow the rarity
   storeOnlyKept: false, // Buy everything: put a purchase away only if its storage already holds that item (new kinds stay in the inventory)
   buyPotions: false, // Buy everything: also buy XP and Hunger potions with Magic Dust (no other dust item is ever bought)
   noLocalStock: ['Grape', 'Lemon', 'Lychee', 'Banana'], // seeds the game lists but doesn't sell you
@@ -1044,6 +1136,7 @@ const DEFAULT_SETTINGS = {
 };
 let settings = { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
 if (settings.pityMutFactor === 0.77) settings.pityMutFactor = 0.7; // old default (too high), corrected
+if (Array.isArray(settings.rareAlertExtra)) { settings.rareAlertPick = { ...Object.fromEntries(settings.rareAlertExtra.map((id) => [id, true])), ...(settings.rareAlertPick ?? {}) }; delete settings.rareAlertExtra; }
 // Abilities added to the default Ignored list later (weather-only copies of regular abilities, 0.15.48-49): each
 // is added once to an Ignored list saved before it joined, so removing one afterwards sticks
 {
@@ -1450,6 +1543,7 @@ const STYLE = `
 #mgpc-crystal label{display:flex;gap:8px;align-items:center;cursor:pointer;color:#f3d0cc}
 #mgpc-crystal .acts{display:flex;gap:8px;justify-content:flex-end}
 #mgpc-crystal button{border-radius:8px;padding:7px 14px;font:600 13px system-ui,sans-serif;cursor:pointer;border:1px solid #ff8a7d;background:#7a2222;color:#fff}
+#mgpc-panel .bell{cursor:pointer;opacity:.45;margin-left:2px}#mgpc-panel .bell.on{opacity:1}
 #mgpc-planthint{position:fixed;z-index:2147483640;transform:translate(-50%,-100%);display:none;gap:4px;align-items:center;padding:4px 8px;border-radius:10px;background:rgba(20,22,26,.82);color:#e8e8e8;font:600 12px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #mgpc-mounthint{position:fixed;left:50%;top:12px;z-index:2147483640;transform:translateX(-50%);display:none;gap:10px;align-items:center;padding:5px 12px;border-radius:10px;background:rgba(20,22,26,.85);color:#e8e8e8;font:600 13px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}#mgpc-mounthint .t{opacity:.8}
 #mgpc-planthint .t{margin-right:2px;opacity:.85}#mgpc-planthint .v{display:inline-flex}
@@ -2671,8 +2765,18 @@ function renderSettings(bar, body) {
       ${chk('taskWarnings', 'Remind me before selling pets (crystal, idle pets)')}
       ${chk('pityPopup', 'Pity line-up popup (needs QPM)')}
       ${list('retiredEggs', 'Eggs left out of the egg plan:')}</details>
+    <details data-sec="remote"${secOpen('remote')}><summary><b>📱 Phone remote</b></summary>
+      ${chk('featRemote', 'Let my phone press Buy and Reconnect on this PC')}
+      ${settings.featRemote && settings.remoteCode ? `<div>Pairing code: <code style="user-select:all">${esc(settings.remoteCode)}</code> <button class="mini" data-a="remotecopy">Copy phone link</button> <button class="mini" data-a="remotenew" title="Make a new code: phones paired with the old one stop working">New code</button> <span class="muted">${esc(remoteStatusText())}</span></div>
+      ${chk('remoteAlerts', 'Also send rare alerts and Buy results to the ntfy phone app')} <span class="muted">(subscribe to <code style="user-select:all">${esc(settings.remoteCode)}-a</code> in the app)</span>` : ''}
+      <div class="muted">Open the copied link on your phone: a small page with your PC's shop status and a Buy button (nothing to install; bookmark it). It works while this game is open on the PC. Messages go through ntfy.sh, a free public relay; keep the link to yourself (anyone with it can press Buy for you; "New code" makes old links stop working). Nothing reconnects by itself: Reconnect only runs when you press it on the phone.</div></details>
     <details data-sec="shop"${secOpen('shop')}><summary><b>🛒 Shop</b></summary>
       ${chk('buyPotions', 'Also buy XP and Hunger potions (Magic Dust)')}
+      ${chk('featRareAlert', '🔔 Alert when a rare item is in stock')}
+      ${sel('rareAlertMin', 'Items you haven\'t picked alert from rarity', [['Mythic', 'Mythic'], ['Divine', 'Divine'], ['Celestial', 'Celestial'], ['none', 'none (only picked items)']])}
+      <div class="muted">Pick items yourself with 🔔 / 🔕 on the 🛒 Shop tab (${Object.keys(settings.rareAlertPick ?? {}).length} picked)${Object.keys(settings.rareAlertPick ?? {}).length ? ' <button class="mini" data-a="rarereset">Clear picks</button>' : ''}.</div>
+      ${sel('rareAlertRepeat', 'Alert', [['once', 'once per restock'], ['repeat', 'again until bought (or 🔕 Stop)']])} ${settings.rareAlertRepeat === 'repeat' ? sel('rareAlertEvery', 'every', [['10', '10 s'], ['15', '15 s'], ['30', '30 s'], ['60', '1 min']]) : ''}
+      ${chk('rareAlertSound', 'Chime')} <label>volume <input type="range" min="0" max="100" step="5" data-f="rareAlertVolume" value="${Number(settings.rareAlertVolume ?? 60)}" style="width:110px"></label> <button class="mini" data-a="chimetest">▶ Test</button> ${chk('rareAlertDesktop', 'System notification (works with the tab in the background)')}
       ${chk('storeOnlyKept', 'Put purchases away only if that item is already in its storage (Seed Silo / Tool Shack / Decor Shed); others stay in the inventory')}
       <div class="muted">Never bought: buildings, one-time items, other Magic Dust items.</div>
       ${list('noLocalStock', 'No local stock:')}</details>
@@ -2705,8 +2809,10 @@ function onChange(e) {
   if (t.dataset.sel) { t.checked ? selected.add(t.dataset.sel) : selected.delete(t.dataset.sel); render(); return; }
   if (t.dataset.f) {
     const k = t.dataset.f;
-    settings[k] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Math.max(0, +t.value || 0) : (t.value || null);
+    settings[k] = t.type === 'checkbox' ? t.checked : t.type === 'number' || t.type === 'range' ? Math.max(0, +t.value || 0) : (t.value || null);
     if (k === 'collectMutations') settings.collectUniqueMutated = t.checked; // one switch for the whole Gold/Rainbow collection
+    if (k === 'featRemote') { if (t.checked && !relay.valid(settings.remoteCode)) settings.remoteCode = relay.newCode(); setTimeout(() => remoteRestart(), 0); }
+    if (k === 'rareAlertDesktop' && t.checked) { try { if (W.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch {} }
   } else if (t.dataset.list) {
     settings[t.dataset.list] = t.value.split(',').map((s) => s.trim()).filter(Boolean);
   } else if (t.dataset.ign) {
@@ -2722,6 +2828,12 @@ function onClick(e) {
   const b = e.target.closest('button');
   // Don't leave the clicked button focused: Space (the game's action key) would press it again
   if (b) setTimeout(() => b.blur(), 0);
+  const bell = e.target.closest('[data-bell]');
+  if (bell && !b) {
+    const id = bell.dataset.bell;
+    settings.rareAlertPick = { ...(settings.rareAlertPick ?? {}), [id]: !bell.classList.contains('on') };
+    saveSettings(); render(); return;
+  }
   const tog = e.target.closest('[data-buyoff]');
   if (tog && !b) {
     const k = tog.dataset.buyoff, offList = settings.buyOff ?? [];
@@ -2764,6 +2876,10 @@ function onClick(e) {
   if (a === 'buyallon') { settings.buyOff = []; saveSettings(); render(); updateShopFab(); return; }
   if (a === 'fabreset') { store.set('fabPos', null); setFabPos(fabPos(), false); avoidOtherButtons(); render(); return; }
   if (a === 'tabreset') { settings.tabOrder = []; saveSettings(); render(); return; }
+  if (a === 'chimetest') { chime(); return; }
+  if (a === 'remotenew') { settings.remoteCode = relay.newCode(); saveSettings(); remoteRestart(); render(); return; }
+  if (a === 'remotecopy') { const link = remotePageLink(); try { navigator.clipboard.writeText(link); toast('Phone link copied: open it on your phone (send it to yourself, or type it in).', { key: 'remote', ms: 6000 }); } catch { prompt('Phone link:', link); } return; }
+  if (a === 'rarereset') { settings.rareAlertPick = {}; saveSettings(); render(); return; }
   if (a === 'reset') { settings = { ...DEFAULT_SETTINGS, pinned: settings.pinned, gardenOwner: settings.gardenOwner }; saveSettings(); analyze(); render(); }
   if (a === 'copy') copyReport(b);
   if (a === 'refreshdata') { b.textContent = 'Refreshing…'; loadLiveData(true); }
@@ -2802,6 +2918,8 @@ async function unlockPet(id, btn) {
 // Only ever runs when you press the button and confirm (never on a timer or a restock), and stops at the first problem.
 const SHOP_NAMES = { seed: '🌱 Seeds', egg: '🥚 Eggs', tool: '🔧 Tools', decor: '🪑 Decor', dawn: '🌅 Dawn', snow: '❄️ Snow', thunder: '⚡ Thunder', amber: '🟠 Amber' };
 let shopBusy = false;
+let lastBuyResult = null; // { at, text } of the last Buy everything run (shown to the phone remote)
+let onRareRing = null; // set by the phone remote: also sends rare alerts to the phone
 // Item picture: the live data's own sprite URL, else mg-api's folder pattern (seeds/, items/, decor/, pets/ for eggs)
 const SPRITE_DIR = { Seed: 'seeds', Tool: 'items', Decor: 'decor', Egg: 'pets' };
 const SPRITE_NAME = { OrangeTulip: 'Tulip' }; // seeds whose picture has a different name (from the plants data)
@@ -2850,7 +2968,7 @@ function renderShop(bar, body) {
   bar.innerHTML = `<span class="grow"><b>${inStock.length}</b> items in stock across ${shops.length} shops, weather shops included (${units} units). Buildings, one-time purchases and anything costing Magic Dust are skipped. Bought items go into your Seed Silo / Tool Shack / Decor Shed when you have one.</span>
     <button data-a="shopbuy" ${block || shopBusy ? 'disabled' : ''} title="${esc(block)}">🛒 Buy everything…</button>`;
   body.innerHTML = `<div class="teams">${shops.map((sh) => `<div class="team"><div class="thd"><b>${esc(shopLabel(sh.key))}</b><span class="tval">${sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).length} to buy</span>${sh.restockIn ? `<span class="muted">restocks in ${dur(sh.restockIn)}</span>` : ''}</div>
-    <div class="shopitems">${shopCatalog(sh).map((i) => `<span class="tag${i.left && !shopSkip(i) && !isBuyOff(sh.key, i.id) ? '' : ' have'}${shopSkip(i) ? '' : ' buytog'}"${shopSkip(i) ? '' : ` data-buyoff="${esc(buyOffKey(sh.key, i.id))}"`} title="${shopSkip(i) ? 'Never bought by Buy everything' : `${i.absent ? 'Not in stock now' : `${i.left} of ${i.stock} left`} · click to switch ${isBuyOff(sh.key, i.id) ? 'it back on' : 'it off'} for Buy everything`}">${shopImg(i, 18)} ${esc(pretty(i.name))} ${i.absent ? '' : `<b>×${i.left}</b>`}${shopSkip(i) ? ' · ' + SKIP_LABEL[shopSkip(i)] : isBuyOff(sh.key, i.id) ? ' · ⏸ switched off' : i.absent ? ' · not in stock now' : i.price ? ` · ${i.price.toLocaleString()}🪙` : ''}</span>`).join('') || '<span class="muted">Empty</span>'}</div></div>`).join('')}</div>`;
+    <div class="shopitems">${shopCatalog(sh).map((i) => `<span class="tag${i.left && !shopSkip(i) && !isBuyOff(sh.key, i.id) ? '' : ' have'}${shopSkip(i) ? '' : ' buytog'}"${shopSkip(i) ? '' : ` data-buyoff="${esc(buyOffKey(sh.key, i.id))}"`} title="${shopSkip(i) ? 'Never bought by Buy everything' : `${i.absent ? 'Not in stock now' : `${i.left} of ${i.stock} left`} · click to switch ${isBuyOff(sh.key, i.id) ? 'it back on' : 'it off'} for Buy everything`}">${shopImg(i, 18)} ${esc(pretty(i.name))} ${i.absent ? '' : `<b>×${i.left}</b>`}${shopSkip(i) ? ' · ' + SKIP_LABEL[shopSkip(i)] : isBuyOff(sh.key, i.id) ? ' · ⏸ switched off' : i.absent ? ' · not in stock now' : i.price ? ` · ${i.price.toLocaleString()}🪙` : ''}${settings.featRareAlert === false ? '' : ` <span class="bell${alertWanted(i) ? ' on' : ''}" data-bell="${esc(i.id)}" title="${alertWanted(i) ? 'Alerts when in stock' : 'No alert'}${(settings.rareAlertPick ?? {})[i.id] == null ? ` (from its rarity${itemRarity(i) ? ': ' + esc(itemRarity(i)) : ''})` : ' (your pick)'} · click to ${alertWanted(i) ? 'turn the alert off' : 'alert when it\'s in stock'}">${alertWanted(i) ? '🔔' : '🔕'}</span>`}</span>`).join('') || '<span class="muted">Empty</span>'}</div></div>`).join('')}</div>`;
 }
 const STORAGE_FOR = { Seed: 'SeedSilo', Tool: 'ToolShack', Decor: 'DecorShed' };
 // What "Buy everything" never buys (built-in, from the game data of 2026-09-30; live data adds new ones):
@@ -3057,19 +3175,20 @@ function shopRulesText() {
 // The Buy everything dialog. It can stay open: it counts down to the next restock, redraws when a shop restocks and
 // lights Buy up again, so you can press Buy once per restock. Nothing is ever bought without your press.
 let shopDialogOpen = false;
+// What Buy everything would buy right now (re-read from the game each time)
+function collectShopBuy() {
+  const shops = game.readShops(settings.gardenOwner) ?? [];
+  const inv0 = game.readStorage(settings.gardenOwner);
+  const wanted = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key, left: Math.min(i.left, roomFor(i, inv0)) }))).filter((i) => i.left > 0);
+  const { items, short } = preflight(wanted, inv0); // checked against your coins, dust and free slots first
+  const next = Math.min(...shops.map((sh) => sh.restockIn || Infinity));
+  const off = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key })));
+  return { shops, items, off, short, units: items.reduce((t, i) => t + i.left, 0), next, restocks: shops.map((sh) => sh.key + ':' + sh.restockId).join('|') };
+}
 async function startShopBuy() {
   if (settings.featBuyAll === false) return;
   if (shopBusy || shopDialogOpen) return;
-  // What would be bought right now (re-read from the game each time)
-  const collect = () => {
-    const shops = game.readShops(settings.gardenOwner) ?? [];
-    const inv0 = game.readStorage(settings.gardenOwner);
-    const wanted = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key, left: Math.min(i.left, roomFor(i, inv0)) }))).filter((i) => i.left > 0);
-    const { items, short } = preflight(wanted, inv0); // checked against your coins, dust and free slots first
-    const next = Math.min(...shops.map((sh) => sh.restockIn || Infinity));
-    const off = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key })));
-    return { shops, items, off, short, units: items.reduce((t, i) => t + i.left, 0), next, restocks: shops.map((sh) => sh.key + ':' + sh.restockId).join('|') };
-  };
+  const collect = collectShopBuy;
   const shortHtml = (short) => {
     if (!short?.length) return '';
     const noSlot = short.some((x) => x.why === 'no free inventory slot'), left = noSlot ? leftoverStacks().length : 0;
@@ -3229,10 +3348,12 @@ async function runShopBuy(items, st) {
     shopBusy = false; updateShopFab();
     render();
   }
-  return esc(stopped ? `Stopped: ${stopped}. Bought ${done} of ${plan.length}.` : `Bought ${done} of ${plan.length}.`)
+  const html = esc(stopped ? `Stopped: ${stopped}. Bought ${done} of ${plan.length}.` : `Bought ${done} of ${plan.length}.`)
     + esc(stored && (stored.moved || stored.kept) ? ` Put away: ${stored.moved} stack${stored.moved === 1 ? '' : 's'}${stored.kept ? `, ${stored.kept} left in your inventory (no room or no storage for them)` : ''}.` : '')
     + (stored?.full?.size ? `<div class="muted">${[...stored.full].map(([n, w]) => `${esc(n)}: ${esc(w)}.`).join(' ')}</div>` : '')
     + (stored?.why?.size ? `<div class="refused"><b>Not put away:</b><ul>${[...stored.why].map(([n, w]) => `<li>${esc(n)}: ${esc(w)}</li>`).join('')}</ul></div>` : '') + skippedText;
+  lastBuyResult = { at: Date.now(), text: html.replace(/<li>/g, ' · ').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim() };
+  return html;
 }
 
 // ---------- Pity line-up alert (needs QPM's pity tracker) ----------
@@ -3287,7 +3408,91 @@ function toast(html, opts = {}) {
   if (!col) { col = document.createElement('div'); col.id = 'mgpc-toasts'; document.body.appendChild(col); }
   col.appendChild(t);
   setTimeout(() => t.remove(), opts.ms ?? 30000); // reminders go stale: gone after 30 s
+  return t;
 }
+// ---------- 🔔 Rare item alert (like Arie's Mod's shop alerts) ----------
+// When a shop has a rare item in stock (seed / egg / tool / decor rarity from the live game data, at or above your
+// setting, or one of your "also alert for" items): a message with a Buy button, an optional chime and an optional system
+// notification. Once per item per restock. Items the mod would never buy (no local stock, dust items, buildings) don't alert unless listed.
+const RARITY_ORDER = ['Common', 'Uncommon', 'Rare', 'Legendary', 'Mythic', 'Mythical', 'Divine', 'Celestial'];
+const rarityRank = (r) => { const i = RARITY_ORDER.indexOf(r); return i < 0 ? -1 : r === 'Mythical' ? RARITY_ORDER.indexOf('Mythic') : i; };
+function itemRarity(i) {
+  if (i.itemType === 'Seed') return unwrapLive(liveData?.plants)?.[i.id]?.seed?.rarity ?? null;
+  const m = unwrapLive(liveData?.eggs)?.[i.id] ?? unwrapLive(liveData?.items)?.[i.id] ?? unwrapLive(liveData?.decors)?.[i.id];
+  return m?.rarity ?? null;
+}
+const rareAlerted = new Set();
+// Does this item alert? Your pick (🔔 / 🔕 on the Shop tab) first, else its rarity against your setting
+const alertWanted = (i) => {
+  const p = (settings.rareAlertPick ?? {})[i.id];
+  if (p != null) return p;
+  if (settings.rareAlertMin === 'none') return false;
+  const r = itemRarity(i);
+  return !!r && rarityRank(r) >= rarityRank(settings.rareAlertMin || 'Divine');
+};
+let chimeCtx = null;
+function chime() {
+  if (!(Number(settings.rareAlertVolume ?? 60) > 0)) return;
+  try {
+    chimeCtx = chimeCtx || new (W.AudioContext || W.webkitAudioContext)();
+    if (chimeCtx.state === 'suspended') chimeCtx.resume();
+    const t0 = chimeCtx.currentTime;
+    [[880, 0], [1320, 0.16]].forEach(([f, dt]) => {
+      const o = chimeCtx.createOscillator(), g = chimeCtx.createGain();
+      o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(chimeCtx.destination);
+      const peak = Math.max(0.0002, 0.5 * Math.min(100, Math.max(0, Number(settings.rareAlertVolume ?? 60))) / 100);
+      g.gain.setValueAtTime(0.0001, t0 + dt); g.gain.exponentialRampToValueAtTime(peak, t0 + dt + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.35);
+      o.start(t0 + dt); o.stop(t0 + dt + 0.4);
+    });
+  } catch {}
+}
+// Items alerted and still waiting (repeat mode rings again until each is bought, sold out, restocked away or silenced)
+const rareActive = new Map(); // key -> item
+let rareLastRing = 0;
+function rareRing(items, first) {
+  const names = items.map((i) => `${pretty(i.name)} ×${i.left}`).join(', ');
+  const repeat = settings.rareAlertRepeat === 'repeat';
+  const t = toast(`<b>🔔 ${first ? 'Rare in stock' : 'Still in stock'}:</b> ${items.map((i) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:6px">${shopImg(i, 22)}${esc(pretty(i.name))} ×${i.left}${i.rarity ? ` <span class="muted">(${esc(i.rarity)})</span>` : ''}</span>`).join('')}${settings.featBuyAll !== false ? ' <button class="mini" data-rarebuy>🛒 Open Buy</button>' : ''}${repeat ? ' <button class="mini" data-rarestop title="Stop repeating for these items until their next restock">🔕 Stop</button>' : ''}`, { key: 'rare', ms: repeat ? 10 * 60000 : 120000 });
+  const stop = () => { rareActive.clear(); t.remove(); }; // each stays in rareAlerted: no new alert until its next restock
+  t.querySelector('[data-rarebuy]')?.addEventListener('click', () => { t.remove(); startShopBuy(); });
+  t.querySelector('[data-rarestop]')?.addEventListener('click', stop);
+  if (repeat) t.querySelector('button[title="Close"]')?.addEventListener('click', stop); // closing it also stops the repeats
+  if (settings.rareAlertSound !== false) chime();
+  if (settings.rareAlertDesktop) {
+    try { if (W.Notification && Notification.permission === 'granted') { const n = new Notification(`Magic Garden: ${first ? 'rare item in stock' : 'still in stock'}`, { body: names, tag: 'mglh-rare', renotify: true }); n.onclick = () => { try { W.focus(); n.close(); } catch {} }; } } catch {}
+  }
+  rareLastRing = Date.now();
+  try { onRareRing?.(items, first); } catch {}
+}
+function checkRareItems() {
+  if (settings.featRareAlert === false) { rareActive.clear(); return; }
+  const shops = game.readShops(settings.gardenOwner); if (!shops) return;
+  const pick = settings.rareAlertPick ?? {};
+  const fresh = [], live = new Map();
+  for (const sh of shops) {
+    for (const i of sh.items) {
+      if (!(i.left > 0)) continue;
+      const key = `${sh.key}:${i.restockId}:${i.id}`;
+      live.set(key, i);
+      if (rareAlerted.has(key)) continue;
+      if (!alertWanted(i)) continue;
+      if (shopSkip({ ...i, shop: sh.key }) && pick[i.id] !== true) continue; // can't or won't be bought
+      rareAlerted.add(key);
+      const it = { ...i, shop: sh.key, rarity: itemRarity(i) };
+      fresh.push(it); rareActive.set(key, it);
+    }
+  }
+  // bought, sold out, restocked away, or no longer wanted: not waiting any more
+  for (const [k, it] of rareActive) { const now = live.get(k); if (!now || !alertWanted(it)) rareActive.delete(k); else it.left = now.left; }
+  if (fresh.length) { rareRing(settings.rareAlertRepeat === 'repeat' ? [...rareActive.values()] : fresh, true); return; }
+  if (settings.rareAlertRepeat !== 'repeat') { rareActive.clear(); return; }
+  const every = Math.max(5, Number(settings.rareAlertEvery) || 15) * 1000;
+  if (rareActive.size && Date.now() - rareLastRing >= every) rareRing([...rareActive.values()], false);
+  if (!rareActive.size) document.querySelectorAll('.mgpc-toast[data-key="rare"]').forEach((x) => x.remove());
+}
+let rareQueued = false;
+game.onChange(() => { if (rareQueued) return; rareQueued = true; setTimeout(() => { rareQueued = false; try { checkRareItems(); } catch (e) { console.error(e); } }, 1000); });
+setInterval(() => { try { checkRareItems(); } catch {} }, 2000); // also paces the repeats
 setInterval(() => { try { checkPityLineUp(); } catch (e) { console.error(e); } }, 15000);
 setTimeout(() => { try { checkPityLineUp(); } catch {} }, 5000);
 
@@ -4001,5 +4206,85 @@ setInterval(applyKeepAwake, 3000);
 const whenRoom = () => (document.body && W.MagicCircle_RoomConnection ? mount() : setTimeout(whenRoom, 500));
 whenRoom();
 LOG(`v${MOD_VERSION} ready — press Alt+P or click 🐾 (bottom-left).`);
+
+// ---------- 📱 Phone remote, PC side ----------
+// Listens on the pairing code's relay topic for the phone's commands and answers with this PC's status:
+//  - buy: runs Buy everything once (same list, checks and rules as pressing Buy here), then reports the result;
+//  - reconnect: only when this PC's game is disconnected (e.g. the phone took the session over): reloads the page;
+//  - ping: sends the status straight away.
+// Commands older than 90 s are ignored (a phone that was asleep doesn't buy something stale). Each runs once.
+// Status ("hb") goes out every 60 s, on each restock, and after every command.
+let remoteStop = null, remoteSeen = new Set(), remoteLastHb = 0, remoteLastSig = '', remoteState = 'off', remoteBuying = false;
+// The phone page lives in the mod's GitHub repo (GitHub Pages); the code goes after the #, which never leaves the phone
+const REMOTE_PAGE = 'https://godgamerover9k.github.io/MG-late-game-helper/remote.html';
+const remotePageLink = () => `${REMOTE_PAGE}#${settings.remoteCode}`;
+function remoteStatusText() {
+  return remoteState === 'on' ? '· listening' : remoteState === 'error' ? '· relay unreachable, retrying' : '';
+}
+function remoteStatus() {
+  const ready = net.readiness();
+  let c = null; try { c = collectShopBuy(); } catch {}
+  const items = (c?.items ?? []).slice(0, 40).map((i) => [String(pretty(i.name)).slice(0, 28), i.left]);
+  return { t: 'hb', v: MOD_VERSION, ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
+    units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying,
+    res: lastBuyResult ? { at: lastBuyResult.at, text: lastBuyResult.text.slice(0, 900) } : null, at: Date.now() };
+}
+async function remoteHeartbeat() {
+  if (!settings.featRemote || !relay.valid(settings.remoteCode)) return;
+  remoteLastHb = Date.now();
+  const ok = await relay.send(settings.remoteCode, remoteStatus());
+  remoteState = ok ? 'on' : 'error';
+}
+async function remoteOnMessage(m) {
+  if (!m || m.t === 'hb' || m.t === 'res' || remoteSeen.has(m.id)) return;
+  remoteSeen.add(m.id); if (remoteSeen.size > 300) remoteSeen = new Set([...remoteSeen].slice(-150));
+  if (!m.time || Date.now() / 1000 - m.time > 90) return; // stale
+  const reply = (text, ok = true) => relay.send(settings.remoteCode, { t: 'res', re: m.cid ?? m.id, cmd: m.t, ok, text, at: Date.now() });
+  if (m.t === 'ping') { await remoteHeartbeat(); return; }
+  if (m.t === 'reconnect') {
+    if (net.readiness().ok) { await reply('The PC is already connected.', false); return; }
+    await reply('Reconnecting the PC…');
+    setTimeout(() => location.reload(), 800);
+    return;
+  }
+  if (m.t === 'buy') {
+    if (settings.featBuyAll === false) { await reply('Buy everything is switched off on the PC.', false); return; }
+    const ready = net.readiness();
+    if (!ready.ok) { await reply(`The PC can't buy right now: ${ready.reason || 'not connected'}.`, false); return; }
+    if (shopBusy || remoteBuying) { await reply('The PC is already buying.', false); return; }
+    const c = collectShopBuy();
+    if (!c.items.length) { await reply('Nothing to buy right now.', false); await remoteHeartbeat(); return; }
+    remoteBuying = true;
+    try {
+      await relay.send(settings.remoteCode, { t: 'res', re: m.cid ?? m.id, cmd: 'buy', ok: true, text: `Buying ${c.units}…`, at: Date.now(), partial: true });
+      const st = document.createElement('div');
+      await runShopBuy(c.items, st);
+      await reply(lastBuyResult?.text || 'Done.');
+      if (settings.remoteAlerts !== false) relay.notify(settings.remoteCode, { title: '🛒 Bought on PC', message: lastBuyResult?.text?.slice(0, 300) || 'Done.', priority: 2, tags: ['shopping_cart'] });
+    } finally { remoteBuying = false; try { render(); } catch {} }
+    await remoteHeartbeat();
+  }
+}
+function remoteRestart() {
+  try { remoteStop?.(); } catch {}
+  remoteStop = null; remoteState = 'off';
+  if (!settings.featRemote || !relay.valid(settings.remoteCode)) return;
+  remoteStop = relay.listen(settings.remoteCode, (m) => { remoteState = 'on'; remoteOnMessage(m); }, '30s');
+  remoteHeartbeat();
+}
+// Rare alerts also go to the ntfy phone app, with a button that presses Buy on this PC
+onRareRing = (items, first) => {
+  if (!first || !settings.featRemote || settings.remoteAlerts === false || !relay.valid(settings.remoteCode)) return;
+  const body = RELAY_PREFIX + JSON.stringify({ t: 'buy', cid: 'app-' + Date.now() });
+  relay.notify(settings.remoteCode, { title: '🔔 Rare in stock', message: items.map((i) => `${pretty(i.name)} ×${i.left}`).join(', '), priority: 4, tags: ['bell'],
+    actions: settings.featBuyAll === false ? [] : [{ action: 'http', label: 'Buy on PC', url: `${RELAY}/${settings.remoteCode}`, method: 'POST', body, clear: true }] });
+};
+// Status on each restock, and every 60 s
+setInterval(() => {
+  if (!settings.featRemote) return;
+  let sig = ''; try { sig = collectShopBuy().restocks + '|' + net.readiness().ok; } catch {}
+  if (sig !== remoteLastSig || Date.now() - remoteLastHb > 60000) { remoteLastSig = sig; remoteHeartbeat(); }
+}, 5000);
+setTimeout(remoteRestart, 3000);
 
 })();

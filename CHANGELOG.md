@@ -1,5 +1,24 @@
 # MG Lategame Helper: changelog
 
+## 0.16.1
+- The phone side of 📱 Phone remote is now a web page instead of a phone userscript: remote.html in the mod's GitHub repository (GitHub Pages). "Copy phone link" copies https://godgamerover9k.github.io/MG-late-game-helper/remote.html#<code>; opening it saves the code on the phone. The page shows the PC's connection, items to buy and next restock, with "Buy on PC" and "Reconnect PC" (asks first). It never connects to the game, so nothing on the phone takes the session over.
+- MG Lategame Helper Lite (phone) from 0.16.0 is withdrawn.
+
+## 0.16.0
+- 📱 Phone remote (Settings → 📱 Phone remote, off by default): the phone can press Buy everything on this PC, and Reconnect when the PC's game is disconnected. Messages go through ntfy.sh (a free public relay) on a secret pairing code ("Copy phone link", "New code"). The PC sends its status (connected, items to buy, next restock, last result) every 60 s and on each restock. A phone Buy runs the same list and checks as pressing Buy on the PC; commands older than 90 s are ignored and each runs once. Reconnect only runs when pressed on the phone and only while the PC is disconnected (it reloads the page).
+- Optional: rare alerts and Buy results also go to the ntfy phone app (topic "<code>-a"); rare alerts there have a "Buy on PC" button.
+- New companion userscript **MG Lategame Helper Lite (phone)** (MG-Lategame-Helper-Lite.user.js), active only on phones/tablets. magicgarden.gg opens a small page instead of the game (the game isn't loaded): the PC's status and items, "Buy on PC", "Reconnect PC", and "Connect here & open Buy". The last loads the game on the phone with drawing slowed to 2 frames a second, sounds blocked and optionally pictures blocked, opens the Buy window, and offers "Disconnect" / "Disconnect & reconnect PC". If the game hasn't connected after 45 s, "Try again without blocking". Connecting on the phone takes the session over from the PC (the game allows one per account).
+
+## 0.15.53
+- 🔔 Rare item alert: "Alert once per restock" or "again until bought". Repeating alerts ring (message, chime, system notification) every 10 s / 15 s / 30 s / 1 min while any alerted item is still in stock, and stop when it's bought or sold out, when the shop restocks, or on "🔕 Stop" (or closing the message) until that item's next restock.
+- Chime volume slider (0 = silent) with a "▶ Test" button.
+
+## 0.15.52
+- 🔔 Rare item alert: pick items yourself. Every item on the 🛒 Shop tab has a 🔔 / 🔕 switch (alerts when in stock / no alert). Items you haven't picked follow the rarity setting, which now also has "none (only picked items)". Settings → 🛒 Shop shows how many items are picked, with "Clear picks". The "Also alert for" list from 0.15.51 became picks.
+
+## 0.15.51
+- 🔔 Rare item alert: when a shop has a rare item in stock, a message lists it (picture, amount, rarity) with an "🛒 Open Buy" button, with a chime. Once per item per restock. Rarity comes from the live game data (seeds, eggs, tools, decor); alerts from Divine up by default (Mythic / Divine / Celestial in Settings → 🛒 Shop). "Also alert for" lists items that always alert. Optional system notification (asks the browser for permission), for when the tab is in the background. Items the mod never buys (no local stock, Magic Dust items, buildings) don't alert unless listed.
+
 ## 0.15.50
 - Hovering an ability shows what it does (the game's own description; a short built-in line where the game has none), and whether it's ignored in your settings.
 - Species with spaces in their name (Red Fox, …) show their picture and their spaced name: the picture is looked up by the game's name when the id doesn't match, then the plain picture, then the initials.
