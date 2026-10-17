@@ -31,7 +31,7 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.16.1</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.16.3</small></h1>
   <section class="card">
     <div id="state" class="state">Loading…</div>
     <div id="items" class="items"></div>
@@ -141,25 +141,34 @@ const relay = {
   if (!relay.valid(code)) $('pair').open = true;
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+  let askedAt = 0, doneAt = 0, pendingCmd = null;
   const draw = () => {
     const fresh = hb && Date.now() - hb.at < 150000;
+    // The restock countdown ran out: ask the PC for the new stock (again every 10 s until it arrives)
+    const left = hb?.next != null ? hb.next - (Date.now() - hb.at) / 1000 : null;
+    if (fresh && left != null && left <= 0 && Date.now() - askedAt > 10000 && relay.valid(code)) { askedAt = Date.now(); setTimeout(() => relay.send(code, { t: 'ping' }), 1500); }
     $('state').innerHTML = !relay.valid(code) ? 'Not paired yet: open the link from your PC, or enter the code below.'
       : !hb ? 'Waiting for your PC… <span class="muted">(game open on it, with Settings → 📱 Phone remote on?)</span>'
       : !fresh ? `<span class="bad">No word from your PC</span> since ${ago(hb.at)}. <span class="muted">It may be off, asleep, or the game tab closed.</span>`
-      : hb.ok ? `<span class="ok">PC connected</span> · ${hb.busy ? 'buying…' : hb.units ? `<b>${hb.units}</b> to buy` : 'nothing to buy'}${hb.next != null ? ` · next restock in ${mmss(Math.max(0, hb.next - (Date.now() - hb.at) / 1000))}` : ''}`
+      : hb.ok ? `<span class="ok">PC connected</span> · ${hb.busy ? 'buying…' : hb.units ? `<b>${hb.units}</b> to buy` : 'nothing to buy'}${left != null ? (left > 0 ? ` · next restock in ${mmss(left)}` : ' · restocking…') : ''}`
       : `<span class="bad">PC disconnected</span>: ${esc(hb.why)} <span class="muted">(${ago(hb.at)})</span>`;
     $('items').innerHTML = fresh && hb.ok && hb.items?.length ? hb.items.map(([n, q]) => `<span>${esc(n)} ×${esc(q)}</span>`).join('') : '';
-    $('buy').disabled = !(fresh && hb.ok && !hb.busy && hb.units > 0) || !!pending;
+    $('buy').disabled = !(fresh && hb.ok && !hb.busy && hb.units > 0) || !!pending || (doneAt && hb.recv < doneAt);
     $('buy').textContent = fresh && hb.ok && hb.units ? `Buy on PC (${hb.units})` : 'Buy on PC';
     $('reconnect').disabled = !(fresh && !hb.ok) || !!pending;
     if (hb?.res && !pending && !$('res').dataset.mine) $('res').textContent = `Last buy, ${ago(hb.res.at)}: ${hb.res.text}`;
   };
   const onMsg = (m) => {
-    if (m.t === 'hb') { hb = m; draw(); return; }
+    // ages use the relay's clock (m.time), not the PC's, so a PC clock that's off doesn't matter
+    if (m.t === 'hb') { hb = { ...m, at: m.time ? m.time * 1000 : Date.now(), recv: Date.now() }; draw(); return; }
     if (m.t === 'res' && pending && m.re === pending) {
       $('res').dataset.mine = '1';
       $('res').innerHTML = m.ok ? esc(m.text) : `<span class="bad">${esc(m.text)}</span>`;
-      if (!m.partial) { pending = null; clearTimeout(timer); }
+      if (!m.partial) {
+        pending = null; clearTimeout(timer);
+        // after a buy, the next status may still show the old stock: wait for one sent 2 s later (and ask for it)
+        if (pendingCmd === 'buy') { doneAt = Date.now() + 2000; setTimeout(() => relay.send(code, { t: 'ping' }), 3000); }
+      }
       draw();
     }
   };
@@ -173,7 +182,7 @@ const relay = {
   };
   const command = async (t) => {
     const cid = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    pending = cid; $('res').dataset.mine = '1'; $('res').textContent = 'Sent… waiting for your PC'; draw();
+    pending = cid; pendingCmd = t; $('res').dataset.mine = '1'; $('res').textContent = 'Sent… waiting for your PC'; draw();
     if (!(await relay.send(code, { t, cid }))) { pending = null; $('res').innerHTML = '<span class="bad">Couldn\'t reach the relay (ntfy.sh). Check your connection.</span>'; draw(); return; }
     clearTimeout(timer);
     timer = setTimeout(() => { if (pending === cid) { pending = null; $('res').innerHTML = '<span class="bad">No answer from your PC.</span>'; draw(); } }, t === 'buy' ? 90000 : 20000);

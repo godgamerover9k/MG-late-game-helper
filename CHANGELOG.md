@@ -1,5 +1,14 @@
 # MG Lategame Helper: changelog
 
+## 0.16.3
+- 🔔 Alerts reworked: each item has its own setting, 🔕 off, 🔔 once per restock, or 🔁 again until bought. "🔔 Choose alerts for each item…" (Settings → 🛒 Shop) opens a menu with every item of every shop (picture, rarity, in stock now), a three-way switch per item, search, a filter (all / alerting / repeating / set by you), "all" buttons per shop and "Reset all". On the 🛒 Shop tab, each item's switch cycles 🔕 → 🔔 → 🔁. Items you haven't set follow the rarity default ("alert once if at least Mythic / Divine / Celestial", or never). The single once/repeat choice is gone; earlier picks carried over.
+- Only 🔁 repeating alerts go to the phone (ntfy app), once per item and restock, with "Buy on PC" and "Stop" buttons; Stop silences the PC's repeats until the next restock.
+- Repeating alerts stop by themselves once their items are bought (the chime and the message), and don't ring while Buy everything is running.
+- Phone page: when the restock countdown reaches 0 it asks the PC for the new stock (again every 10 s until it arrives) and shows "restocking…". While buying, progress ("Buying… 40 of 123 done") updates about once a second. After a buy, Buy stays greyed until a status sent after the purchases arrives (the PC sends one right away and another 2.5 s later), so it no longer looks buyable until pressed again. The PC also sends its status within 5 s whenever the number of items to buy changes. Ages and the countdown use the relay's clock.
+
+## 0.16.2
+- 🛒 Shop tab: a shop with no stock and no restock timer shows "closed" instead of "0 to buy" / "Empty"; the Spooky shop, which is only open at night, says so ("Closed: the Spooky shop is only open at night (30 minutes every 10 hours)").
+
 ## 0.16.1
 - The phone side of 📱 Phone remote is now a web page instead of a phone userscript: remote.html in the mod's GitHub repository (GitHub Pages). "Copy phone link" copies https://godgamerover9k.github.io/MG-late-game-helper/remote.html#<code>; opening it saves the code on the phone. The page shows the PC's connection, items to buy and next restock, with "Buy on PC" and "Reconnect PC" (asks first). It never connects to the game, so nothing on the phone takes the session over.
 - MG Lategame Helper Lite (phone) from 0.16.0 is withdrawn.

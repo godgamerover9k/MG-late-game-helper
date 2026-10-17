@@ -23,7 +23,7 @@ Press **Buy everything** on your PC from your phone, without installing anything
 
 The page shows whether your PC's game is connected, what's in stock to buy and when the next restock is, with a **Buy on PC** button (the same list and checks as pressing Buy on the PC) and **Reconnect PC** (reloads the game on the PC after it was disconnected; only when you press it). The phone never joins the game, so nothing gets disconnected. The PC must be on with the game open.
 
-The page is [remote.html](remote.html) in this repository, served by GitHub Pages. It talks to your PC through [ntfy.sh](https://ntfy.sh), a free public relay, on a secret pairing code (the part after # in the link, which stays on your phone). Keep the link to yourself; **New code** makes old links stop working. Rare alerts and Buy results can also go to the ntfy phone app, with a "Buy on PC" button.
+The page is [remote.html](remote.html) in this repository, served by GitHub Pages. It talks to your PC through [ntfy.sh](https://ntfy.sh), a free public relay, on a secret pairing code (the part after # in the link, which stays on your phone). Keep the link to yourself; **New code** makes old links stop working. Repeating item alerts and Buy results can also go to the ntfy phone app, with "Buy on PC" and "Stop" buttons.
 
 ## Features
 
@@ -39,7 +39,7 @@ The page is [remote.html](remote.html) in this repository, served by GitHub Page
 - **Journal:** pet and crop logging, crop filters by mutation, the missing variants shown above the plant you stand on, and seeds taken from the Seed Silo in one press.
 - **Mounts:** while riding a Thundercharger or Capture pet, shows how many crops it would charge or capsules it would make where you stand.
 - **Buy everything:** buys every shop's stock in one press per restock and puts purchases away in the Seed Silo, Tool Shack and Decor Shed. You can switch off individual items. Buildings, one-time items and Magic Dust items are never bought (XP and Hunger potions optional).
-- **Rare item alert:** a message, chime and optional system notification when an item you picked (or a rare one) is in a shop.
+- **Item alerts:** for every item, no alert, once per restock, or repeating until bought (repeating ones also reach your phone).
 - **📱 Phone page:** press Buy or Reconnect on your PC from your phone.
 - **Other:**
   - joins a public room with 5 players in one press;
