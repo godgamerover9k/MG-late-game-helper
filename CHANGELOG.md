@@ -1,5 +1,16 @@
 # MG Lategame Helper: changelog
 
+## 0.17.0
+- 📱 Phone remote: the phone page and the PC now talk through public MQTT message brokers (HiveMQ and EMQX, both at once, so either can be down) over secure websockets, instead of ntfy.sh. No account and no daily message limit (ntfy.sh's free tier allows 250 messages a day per internet address, which ran out). A browser can't accept connections, so the two still need a server in between; nothing else is sent through it.
+- The PC's status is kept on the brokers: the phone page shows it the moment it opens, with no request needed. The PC refreshes it every 60 s, on each restock or change in what's to buy, and after each command. If the PC's game tab closes or loses its internet, the brokers mark it offline by themselves ("PC offline").
+- Buy progress to the phone is back to about once a second. The phone page shows "Can't reach the relay servers" when neither broker answers, and reconnects right away after the phone sleeps.
+- The ntfy app stays optional, only for notifications: repeating alerts and their "Buy on PC" / "Stop" buttons (and a "Bought on PC" note after a buy from those buttons). The relay-messages-left count is gone from Settings.
+
+## 0.16.5
+- 📱 Phone remote now stays within the free relay's limit: ntfy.sh allows 250 messages a day per internet address (a phone and PC on the same Wi-Fi share it), and the PC's status every minute used that up within hours, after which the phone page only showed "Waiting for your PC". Now the PC sends nothing until a phone asks; while the phone page is open (2.5 minutes after its last message) it sends its status when asked, on each restock or change in what's to buy (at most every 10 s), and after commands. The page asks when opened and every 2 minutes while on screen, and after a restock only if nothing came within 20 s.
+- Buy progress to the phone: every 2 s, at most 10 updates per buy.
+- When the relay refuses because the daily limit is used up, the phone page and Settings → 📱 Phone remote say so. Settings shows how many relay messages are left today (checked every 10 minutes; checking costs nothing).
+
 ## 0.16.4
 - Phone page: item pictures next to each item to buy ("Show item pictures", on by default, remembered on the phone). The PC sends each item's picture path with its status; if a status would be too big for the relay (4 KB), the last result's text is shortened first, then pictures are left out, then the list is cut.
 - Phone page: reconnects by itself when it comes back on screen, comes back online, or hears nothing from the PC for 70 s, keeping the last status shown meanwhile. The relay connection (phone and PC) is reopened when it goes quiet for 75 s (ntfy's keepalive comes every ~45 s), so a connection that died silently no longer needs a page refresh.

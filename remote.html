@@ -33,7 +33,7 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.16.4</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.17.0</small></h1>
   <section class="card">
     <div id="state" class="state">Loading…</div>
     <div id="items" class="items"></div>
@@ -48,18 +48,91 @@
     </details>
     <label class="opt"><input type="checkbox" id="pics"> Show item pictures</label>
   </section>
-  <p class="muted">This page presses Buy everything on your PC, with the same list and checks as pressing Buy there; it never connects to the game itself, so nothing gets disconnected. Messages go through ntfy.sh, a free public relay.</p>
+  <p class="muted">This page presses Buy everything on your PC, with the same list and checks as pressing Buy there; it never connects to the game itself, so nothing gets disconnected. Messages go through public MQTT relay servers (HiveMQ and EMQX).</p>
 </main>
 <script>
 'use strict';
+const W = window;
 // ---------------------------------------------------------------------------
-// Phone ↔ PC relay (📱 Phone remote). Messages go through ntfy.sh, a free public message relay: the PC mod and the
-// phone both listen on one secret topic (the pairing code). Only short JSON lines prefixed "mglh1 " are sent: commands
-// from the phone (buy / reconnect / ping) and the PC's status. Anyone who knows the code could press Buy for you, so
-// it's long and random; "New code" on the PC replaces it.
+// Phone ↔ PC relay (📱 Phone remote).
+// A browser can't accept connections, so the PC and the phone can't talk to each other directly: both connect out to a
+// public MQTT message broker (HiveMQ and EMQX, both at once, so one being down doesn't matter) over a secure websocket
+// and meet on a secret topic named after the pairing code. No accounts and no daily message limit. The PC's status is
+// kept on the broker ("retained"), so the phone sees it the moment it connects, and if the PC's tab closes the broker
+// itself marks it offline ("last will"). Only short JSON messages are sent: commands from the phone (buy / reconnect /
+// ping / stop) and the PC's status and results. Anyone who knows the code could press Buy for you, so it's long and
+// random; "New code" on the PC replaces it.
+// Phone notifications through the ntfy app (optional) still go through ntfy.sh, a few a day.
 // ---------------------------------------------------------------------------
 const RELAY = 'https://ntfy.sh';
 const RELAY_PREFIX = 'mglh1 ';
+const MQTT_BROKERS = ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt'];
+
+// A small MQTT 3.1.1 client (QoS 0) over a websocket: connect (with an optional last will), subscribe, publish, keepalive,
+// and reconnect with backoff.
+function mqttClient(url, { clientId, will, onMessage, onState, WS }) {
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const str = (s) => { const b = typeof s === 'string' ? enc.encode(s) : s; return [b.length >> 8, b.length & 255, ...b]; };
+  const varint = (n) => { const out = []; do { let d = n % 128; n = Math.floor(n / 128); if (n > 0) d |= 128; out.push(d); } while (n > 0); return out; };
+  const packet = (head, body) => new Uint8Array([head, ...varint(body.length), ...body]);
+  let ws = null, closed = false, connected = false, wait = 2000, buf = new Uint8Array(0), pid = 1, heard = 0, timer = null;
+  const subs = [];
+  const raw = (bytes) => { try { if (ws && ws.readyState === 1) { ws.send(bytes); return true; } } catch {} return false; };
+  const setState = (on) => { if (connected !== on) { connected = on; try { onState?.(on); } catch {} } };
+  const sendSub = (topic) => raw(packet(0x82, [pid >> 8, pid++ & 255, ...str(topic), 0]));
+  const handle = (head, body) => {
+    const type = head >> 4;
+    if (type === 2) { // CONNACK
+      if (body[1] === 0) { wait = 2000; setState(true); subs.forEach(sendSub); } else { try { ws.close(); } catch {} }
+    } else if (type === 3) { // PUBLISH
+      const tl = (body[0] << 8) | body[1];
+      const topic = dec.decode(body.slice(2, 2 + tl));
+      const start = 2 + tl + (((head >> 1) & 3) > 0 ? 2 : 0);
+      try { onMessage?.(topic, dec.decode(body.slice(start)), (head & 1) === 1); } catch (e) { console.error('[mglh relay]', e); }
+    }
+  };
+  const onData = (data) => {
+    heard = Date.now();
+    const chunk = new Uint8Array(data);
+    const merged = new Uint8Array(buf.length + chunk.length); merged.set(buf); merged.set(chunk, buf.length); buf = merged;
+    for (;;) {
+      if (buf.length < 2) return;
+      let len = 0, mult = 1, i = 1, ok = false;
+      for (; i < buf.length && i < 5; i++) { len += (buf[i] & 127) * mult; mult *= 128; if (!(buf[i] & 128)) { ok = true; i++; break; } }
+      if (!ok || buf.length < i + len) return;
+      handle(buf[0], buf.slice(i, i + len));
+      buf = buf.slice(i + len);
+    }
+  };
+  const open = () => {
+    if (closed) return;
+    try { ws = new WS(url, ['mqtt']); } catch { setTimeout(open, wait); wait = Math.min(30000, wait * 2); return; }
+    ws.binaryType = 'arraybuffer'; buf = new Uint8Array(0); heard = Date.now();
+    ws.onopen = () => {
+      const flags = 0x02 | (will ? 0x04 | 0x20 : 0); // clean session; last will, kept on the broker
+      raw(packet(0x10, [...str('MQTT'), 4, flags, 0, 60, ...str(clientId), ...(will ? [...str(will.topic), ...str(will.payload)] : [])]));
+    };
+    ws.onmessage = (e) => { const d = e.data; if (d && typeof d.arrayBuffer === 'function') d.arrayBuffer().then(onData); else if (d && typeof d.byteLength === 'number') onData(d); };
+    ws.onclose = () => { setState(false); ws = null; if (!closed) { setTimeout(open, wait); wait = Math.min(30000, wait * 2); } };
+    ws.onerror = () => { try { ws?.close(); } catch {} };
+  };
+  // keepalive every 30 s; a connection silent for 75 s (a phone that slept, a dropped network) is replaced
+  timer = setInterval(() => {
+    if (!ws) return;
+    if (Date.now() - heard > 75000) { try { ws.close(); } catch {} return; }
+    raw(new Uint8Array([0xC0, 0]));
+  }, 30000);
+  open();
+  return {
+    get connected() { return connected; },
+    subscribe(topic) { subs.push(topic); if (connected) sendSub(topic); },
+    publish(topic, payload, retain = false) { return connected && raw(packet(0x30 | (retain ? 1 : 0), [...str(topic), ...enc.encode(payload)])); },
+    // a dead connection (e.g. after the phone slept): drop it now instead of waiting for the keepalive
+    kick() { if (ws && Date.now() - heard > 35000) { try { ws.close(); } catch {} } else if (!ws && !closed) { wait = 2000; } },
+    close() { closed = true; clearInterval(timer); raw(new Uint8Array([0xE0, 0])); try { ws?.close(); } catch {} },
+  };
+}
+
 const relay = {
   newCode() {
     const abc = 'abcdefghijkmnpqrstuvwxyz23456789';
@@ -67,37 +140,57 @@ const relay = {
     return 'mglh-' + [...r].map((x) => abc[x % abc.length]).join('');
   },
   valid: (code) => typeof code === 'string' && /^mglh-[a-z0-9]{8,40}$/.test(code),
-  // One message to the topic (text body: no browser preflight needed)
-  async send(code, obj) {
-    if (!relay.valid(code)) return false;
-    try { const r = await fetch(`${RELAY}/${code}`, { method: 'POST', body: RELAY_PREFIX + JSON.stringify(obj) }); return r.ok; } catch { return false; }
+  // Connect to the brokers for this code. onMsg(msg, { retained }) gets each message once (both brokers carry it).
+  // will: a status message the brokers publish (and keep) if this side disappears without saying goodbye.
+  // Returns { send(obj, { retain }), connected (how many brokers), kick(), close() }.
+  connect(code, { onMsg, onState, will } = {}) {
+    const g = typeof globalThis !== 'undefined' ? globalThis : {};
+    const W0 = typeof W !== 'undefined' ? W : g;
+    const WS = W0.__mglhWS || g.__mglhWS || W0.WebSocket || g.WebSocket;
+    const brokers = W0.__mglhBrokers || g.__mglhBrokers || MQTT_BROKERS;
+    const base = `mglh/${code}`, seen = new Set(), seenList = [];
+    const clientId = 'mglh-' + Math.random().toString(36).slice(2, 12);
+    const topicOf = (obj) => (obj.t === 'hb' ? `${base}/s` : `${base}/m`);
+    const clients = brokers.map((url) => mqttClient(url, {
+      clientId, WS, onState: () => { try { onState?.(clients.filter((c) => c.connected).length); } catch {} },
+      will: will ? { topic: topicOf(will), payload: RELAY_PREFIX + JSON.stringify({ ...will, mid: 'will-' + clientId }) } : null,
+      onMessage: (topic, text, retained) => {
+        if (!text.startsWith(RELAY_PREFIX)) return;
+        let m; try { m = JSON.parse(text.slice(RELAY_PREFIX.length)); } catch { return; }
+        if (!m || !m.mid) return;
+        const key = m.mid + (retained ? ':r' : '');
+        if (seen.has(key)) return;
+        seen.add(key); seenList.push(key); if (seenList.length > 400) seen.delete(seenList.shift());
+        onMsg?.(m, { retained });
+      },
+    }));
+    clients.forEach((c) => c.subscribe(`${base}/#`));
+    return {
+      send(obj, { retain = false } = {}) {
+        const msg = { ...obj, mid: Math.random().toString(36).slice(2, 12) + Date.now().toString(36) };
+        const text = RELAY_PREFIX + JSON.stringify(msg);
+        return clients.map((c) => c.publish(topicOf(msg), text, retain)).some(Boolean);
+      },
+      get connected() { return clients.filter((c) => c.connected).length; },
+      kick() { clients.forEach((c) => c.kick()); },
+      close() { clients.forEach((c) => c.close()); },
+    };
   },
-  // A notification for the ntfy phone app (topic "<code>-a"), optionally with action buttons that send a command back
+  // ---- ntfy.sh: only for the optional ntfy phone app (notifications, and its "Buy on PC" / "Stop" buttons) ----
+  // A notification on topic "<code>-a"; its buttons post a command to topic "<code>", which the PC also listens to.
   async notify(code, { title, message, priority = 3, tags = [], actions = [] }) {
     if (!relay.valid(code)) return false;
     try {
-      const body = JSON.stringify({ topic: code + '-a', title, message, priority, tags, actions });
-      const r = await fetch(`${RELAY}/`, { method: 'POST', body });
+      const r = await fetch(`${RELAY}/`, { method: 'POST', body: JSON.stringify({ topic: code + '-a', title, message, priority, tags, actions }) });
       return r.ok;
     } catch { return false; }
-  },
-  // The last messages (since = '2m', '1h', or a message id), oldest first
-  async poll(code, since = '2m') {
-    if (!relay.valid(code)) return [];
-    try {
-      const r = await fetch(`${RELAY}/${code}/json?poll=1&since=${encodeURIComponent(since)}`);
-      if (!r.ok) return [];
-      return (await r.text()).split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((m) => m?.event === 'message').map(relay.parse).filter(Boolean);
-    } catch { return []; }
   },
   parse(m) {
     if (typeof m?.message !== 'string' || !m.message.startsWith(RELAY_PREFIX)) return null;
     try { return { id: m.id, time: m.time, ...JSON.parse(m.message.slice(RELAY_PREFIX.length)) }; } catch { return null; }
   },
-  // Keep listening (a long-lived stream that reconnects by itself). Returns a stop function.
-  // ntfy sends a keepalive every ~45 s; a stream that goes quiet for 75 s (a phone that slept, a dropped network) is
-  // dropped and opened again from the last message seen, instead of hanging silently.
-  listen(code, onMsg, since = '1m') {
+  // Listen on the ntfy topic (a long-lived stream that reconnects by itself; dropped and reopened after 75 s of silence)
+  ntfyListen(code, onMsg, since = '1m') {
     const st = { stopped: false }; let ctrl = null, last = since, wait = 2000, heard = Date.now();
     const dog = setInterval(() => { if (!st.stopped && Date.now() - heard > 75000) { heard = Date.now(); try { ctrl?.abort(); } catch {} } }, 5000);
     const loop = async () => {
@@ -144,55 +237,61 @@ const relay = {
   const put = (v) => { try { localStorage.setItem(KEY, v); } catch {} };
   // A pairing link (…#mglh-CODE or …#mglh=mglh-CODE) saves the code, then the # part is removed from the address bar
   { const m = /(mglh-[a-z0-9]{8,40})/.exec(location.hash || ''); if (m) { put(m[1]); try { history.replaceState(null, '', location.pathname + location.search); } catch {} } }
-  let code = get(), hb = null, stop = null, pending = null, timer = null;
+  let code = get(), hb = null, session = null, pending = null, timer = null, linkSince = Date.now();
   $('code').value = code;
   if (!relay.valid(code)) $('pair').open = true;
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
   let askedAt = 0, doneAt = 0, pendingCmd = null;
   const draw = () => {
-    const fresh = hb && Date.now() - hb.at < 150000;
-    // The restock countdown ran out: ask the PC for the new stock (again every 10 s until it arrives)
-    const left = hb?.next != null ? hb.next - (Date.now() - hb.at) / 1000 : null;
-    if (fresh && left != null && left <= 0 && Date.now() - askedAt > 10000 && relay.valid(code)) { askedAt = Date.now(); setTimeout(() => relay.send(code, { t: 'ping' }), 1500); }
+    const linked = session?.connected > 0;
+    // The PC refreshes its status every 60 s: older than 2.5 minutes means it stopped
+    const fresh = hb && !hb.off && Date.now() - hb.base < 150000;
+    const left = hb?.next != null ? hb.next - (Date.now() - hb.base) / 1000 : null;
+    // the PC sends the new stock by itself after a restock; ask only if it hasn't come 20 s later
+    if (fresh && left != null && left <= -20 && Date.now() - askedAt > 60000) { askedAt = Date.now(); send({ t: 'ping' }); }
     $('state').innerHTML = !relay.valid(code) ? 'Not paired yet: open the link from your PC, or enter the code below.'
-      : !hb ? 'Waiting for your PC… <span class="muted">(game open on it, with Settings → 📱 Phone remote on?)</span>'
-      : !fresh ? `<span class="bad">No word from your PC</span> since ${ago(hb.at)}. <span class="muted">It may be off, asleep, or the game tab closed.</span>`
+      : !linked && Date.now() - linkSince > 8000 ? '<span class="bad">Can\'t reach the relay servers.</span> <span class="muted">Check this phone\'s internet; it keeps retrying.</span>'
+      : !hb ? (linked ? 'Waiting for your PC… <span class="muted">(game open on it, with Settings → 📱 Phone remote on?)</span>' : 'Connecting…')
+      : hb.off ? `<span class="bad">PC offline</span>: ${esc(hb.why || 'the game tab closed')}. <span class="muted">Open the game on the PC.</span>`
+      : !fresh ? `<span class="bad">No word from your PC</span> since ${ago(hb.base)}. <span class="muted">It may be off, asleep, or the game tab closed.</span>`
       : hb.ok ? `<span class="ok">PC connected</span> · ${hb.busy ? 'buying…' : hb.units ? `<b>${hb.units}</b> to buy` : 'nothing to buy'}${left != null ? (left > 0 ? ` · next restock in ${mmss(left)}` : ' · restocking…') : ''}`
-      : `<span class="bad">PC disconnected</span>: ${esc(hb.why)} <span class="muted">(${ago(hb.at)})</span>`;
+      : `<span class="bad">PC's game disconnected</span>: ${esc(hb.why)}`;
     const pics = showPics();
     $('items').innerHTML = fresh && hb.ok && hb.items?.length ? hb.items.map(([n, q, img]) => `<span>${pics && img ? `<img src="https://mg-api.ariedam.fr/assets/sprites/${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}${esc(n)} ×${esc(q)}</span>`).join('') : '';
-    $('buy').disabled = !(fresh && hb.ok && !hb.busy && hb.units > 0) || !!pending || (doneAt && hb.recv < doneAt);
+    $('buy').disabled = !(linked && fresh && hb.ok && !hb.busy && hb.units > 0) || !!pending || (doneAt && hb.recv < doneAt);
     $('buy').textContent = fresh && hb.ok && hb.units ? `Buy on PC (${hb.units})` : 'Buy on PC';
-    $('reconnect').disabled = !(fresh && !hb.ok) || !!pending;
+    $('reconnect').disabled = !(linked && fresh && !hb.ok) || !!pending;
     if (hb?.res && !pending && !$('res').dataset.mine) $('res').textContent = `Last buy, ${ago(hb.res.at)}: ${hb.res.text}`;
   };
-  const onMsg = (m) => {
-    // ages use the relay's clock (m.time), not the PC's, so a PC clock that's off doesn't matter
-    if (m.t === 'hb') { hb = { ...m, at: m.time ? m.time * 1000 : Date.now(), recv: Date.now() }; draw(); return; }
+  const onMsg = (m, { retained }) => {
+    if (m.t === 'hb') {
+      // a status kept on the server is as old as the PC says; a live one is from now (so a PC clock that's off doesn't matter)
+      hb = { ...m, base: retained ? Math.min(Date.now(), m.at || 0) : Date.now(), recv: Date.now() };
+      draw(); return;
+    }
     if (m.t === 'res' && pending && m.re === pending) {
       $('res').dataset.mine = '1';
       $('res').innerHTML = m.ok ? esc(m.text) : `<span class="bad">${esc(m.text)}</span>`;
       if (!m.partial) {
         pending = null; clearTimeout(timer);
-        // after a buy, the next status may still show the old stock: wait for one sent 2 s later (and ask for it)
-        if (pendingCmd === 'buy') { doneAt = Date.now() + 2000; setTimeout(() => relay.send(code, { t: 'ping' }), 3000); }
+        if (pendingCmd === 'buy') doneAt = Date.now() + 2000; // the PC sends fresh status 2.5 s after buying
       }
       draw();
     }
   };
-  const connect = async (keep) => {
-    try { stop?.(); } catch {}
-    if (!keep) { hb = null; draw(); } // a reconnect keeps showing the last status until a new one arrives
+  const send = (obj) => !!session?.send(obj);
+  const connect = () => {
+    try { session?.close(); } catch {}
+    hb = null; linkSince = Date.now(); draw();
     if (!relay.valid(code)) return;
-    for (const m of await relay.poll(code, '30m')) onMsg(m);
-    stop = relay.listen(code, onMsg, '1s');
-    relay.send(code, { t: 'ping' });
+    let asked = false;
+    session = relay.connect(code, { onMsg, onState: (n) => { if (n && !asked) { asked = true; setTimeout(() => send({ t: 'ping' }), 300); } draw(); } });
   };
-  const command = async (t) => {
+  const command = (t) => {
     const cid = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    if (!send({ t, cid })) { $('res').dataset.mine = '1'; $('res').innerHTML = '<span class="bad">Not connected to the relay yet. Try again in a moment.</span>'; return; }
     pending = cid; pendingCmd = t; $('res').dataset.mine = '1'; $('res').textContent = 'Sent… waiting for your PC'; draw();
-    if (!(await relay.send(code, { t, cid }))) { pending = null; $('res').innerHTML = '<span class="bad">Couldn\'t reach the relay (ntfy.sh). Check your connection.</span>'; draw(); return; }
     clearTimeout(timer);
     timer = setTimeout(() => { if (pending === cid) { pending = null; $('res').innerHTML = '<span class="bad">No answer from your PC.</span>'; draw(); } }, t === 'buy' ? 90000 : 20000);
   };
@@ -205,15 +304,16 @@ const relay = {
     if (!relay.valid(v)) { $('res').innerHTML = '<span class="bad">That isn\'t a pairing code (it starts with mglh-).</span>'; return; }
     code = v; put(v); $('pair').open = false; delete $('res').dataset.mine; $('res').textContent = ''; connect();
   };
-  // Back on the page after the phone slept, or back online: the old connection may be dead, so start a fresh one
-  // (catching up on what was missed) instead of waiting for it to time out
+  // Back on the page after the phone slept, or back online: drop a dead connection right away and ask for fresh status
   let lastWake = 0;
-  const wake = () => { if (document.hidden || !relay.valid(code) || Date.now() - lastWake < 3000) return; lastWake = Date.now(); connect(true); };
+  const wake = () => {
+    if (document.hidden || !session || Date.now() - lastWake < 3000) return;
+    lastWake = Date.now(); session.kick();
+    setTimeout(() => send({ t: 'ping' }), 1500);
+  };
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('pageshow', wake);
   window.addEventListener('online', wake);
-  // No status for 70 s while the page is open: reconnect too
-  setInterval(() => { if (!document.hidden && relay.valid(code) && (!hb || Date.now() - hb.recv > 70000) && Date.now() - lastWake > 60000) wake(); }, 10000);
   setInterval(draw, 1000);
   connect();
 })();
