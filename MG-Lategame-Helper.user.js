@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.17.0
+// @version      0.17.2
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -29,7 +29,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.17.0';
+const MOD_VERSION = '0.17.2';
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote).
@@ -4321,14 +4321,20 @@ const variantIconHtml = (v, px = 22) => MUTATION_SPRITE[v]
 // The game keeps some values only in its page store (the world map layout, your position), not in the room state. Read
 // the way Arie's Mod / QPM do: atoms from window.jotaiAtomCache by their label; a static atom's value is its init,
 // others are read with the store's get, picked up once from the first atom write (atom writes are then restored).
+// Since game release 1604 the game puts its store at window.__jotaiStore before it renders (the devs' note, 2026-10):
+// that is used whenever it's there. The write patch below is only the fallback for older releases (it never touches an
+// atom's read, which the devs asked mods not to patch: it can crash the game).
 const jotai = (() => {
   let get = null, patching = false;
+  const patched = [];
+  const restore = () => { for (const a of patched) { try { a.write = a.__mgpcWrite; delete a.__mgpcWrite; } catch {} } patched.length = 0; patching = false; };
+  const official = () => { try { const st = W.__jotaiStore || W.__jotaiStore__; return st && typeof st.get === 'function' ? st : null; } catch { return null; } };
+  const getter = () => { const st = official(); if (st) { if (patched.length) restore(); return (a) => st.get(a); } return get; };
   const cache = () => W.jotaiAtomCache?.cache;
   const find = (re) => { const c = cache(); if (!c) return null; for (const a of c.values()) { const l = a?.debugLabel || a?.label || ''; if (re.test(String(l))) return a; } return null; };
   const capture = () => {
-    const c = cache(); if (!c || get || patching) return;
-    patching = true; const patched = [];
-    const restore = () => { for (const a of patched) { try { a.write = a.__mgpcWrite; delete a.__mgpcWrite; } catch {} } patched.length = 0; patching = false; };
+    const c = cache(); if (!c || get || patching || official()) return;
+    patching = true;
     const onWrite = (g) => { if (!get) { get = g; setTimeout(restore, 0); } };
     const wrapWrite = (orig) => function (g, ...rest) { onWrite(g); return orig.call(this, g, ...rest); };
     for (const a of c.values()) {
@@ -4340,12 +4346,13 @@ const jotai = (() => {
   };
   const read = (re) => {
     const a = find(re); if (!a) return undefined;
-    if (get) { try { return get(a); } catch {} }
+    const g = getter();
+    if (g) { try { return g(a); } catch {} }
     if ('init' in a && a.init != null && typeof a.read !== 'function') return a.init;
     capture();
     return 'init' in a ? a.init : undefined;
   };
-  const live = (re) => { const a = find(re); if (!a) return undefined; if (!get) { capture(); return undefined; } try { return get(a); } catch { return undefined; } };
+  const live = (re) => { const a = find(re); if (!a) return undefined; const g = getter(); if (!g) { capture(); return undefined; } try { return g(a); } catch { return undefined; } };
   return { read, live, capture };
 })();
 try { W.__mglhIdFromStore = () => { const v = jotai.live(/^playerIdAtom$/); if (typeof v === 'string' && v.trim()) return v.trim(); const pl = jotai.live(/^player(?:Data)?Atom$/); return typeof pl?.id === 'string' ? pl.id : null; }; } catch {}

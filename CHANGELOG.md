@@ -1,5 +1,11 @@
 # MG Lategame Helper: changelog
 
+## 0.17.2
+- The game's page store (used for your player id, the world map and your position, e.g. for the riding hint) is read through window.__jotaiStore, which the game provides from release 1604 (developers' note). Nothing in the game is patched then; any temporary patch from before the store appeared is undone. On older releases the earlier method (a short-lived patch of atom writes, never of reads) is kept as a fallback.
+
+## 0.17.1
+- Phone page: the item pictures no longer flicker (the list is only redrawn when it changes, not every second). When there's something to buy, the Buy button turns red and pulses like the 🛒 button in the game, and the tab title shows the count ("🛒 12 to buy"). No pulsing when the phone asks for reduced motion.
+
 ## 0.17.0
 - 📱 Phone remote: the phone page and the PC now talk through public MQTT message brokers (HiveMQ and EMQX, both at once, so either can be down) over secure websockets, instead of ntfy.sh. No account and no daily message limit (ntfy.sh's free tier allows 250 messages a day per internet address, which ran out). A browser can't accept connections, so the two still need a server in between; nothing else is sent through it.
 - The PC's status is kept on the brokers: the phone page shows it the moment it opens, with no request needed. The PC refreshes it every 60 s, on each restock or change in what's to buy, and after each command. If the PC's game tab closes or loses its internet, the brokers mark it offline by themselves ("PC offline").

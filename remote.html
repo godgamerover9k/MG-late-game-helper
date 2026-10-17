@@ -24,6 +24,9 @@
   label.opt { display:flex; align-items:center; gap:8px; font-size:14px; color:var(--muted); margin-top:8px; }
   button { font:inherit; font-weight:650; width:100%; min-height:52px; border-radius:12px; border:1px solid var(--line); background:var(--btn); color:var(--text); margin-top:10px; }
   button.go { background:var(--go); border-color:transparent; color:var(--goText); font-size:18px; min-height:60px; }
+  button.go.ready { background:#c0392b; animation:pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(231,76,60,.55); } 50% { box-shadow:0 0 0 8px rgba(231,76,60,0); } }
+  @media (prefers-reduced-motion: reduce) { button.go.ready { animation:none; } }
   button:disabled { opacity:.45; }
   .res { margin-top:10px; font-size:14px; white-space:pre-wrap; }
   .row { display:flex; gap:8px; } .row input { flex:1; } .row button { width:auto; min-height:44px; margin:0; padding:0 16px; }
@@ -33,7 +36,7 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.17.0</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.17.2</small></h1>
   <section class="card">
     <div id="state" class="state">Loading…</div>
     <div id="items" class="items"></div>
@@ -242,7 +245,7 @@ const relay = {
   if (!relay.valid(code)) $('pair').open = true;
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
-  let askedAt = 0, doneAt = 0, pendingCmd = null;
+  let askedAt = 0, doneAt = 0, pendingCmd = null, lastItems = null;
   const draw = () => {
     const linked = session?.connected > 0;
     // The PC refreshes its status every 60 s: older than 2.5 minutes means it stopped
@@ -258,8 +261,14 @@ const relay = {
       : hb.ok ? `<span class="ok">PC connected</span> · ${hb.busy ? 'buying…' : hb.units ? `<b>${hb.units}</b> to buy` : 'nothing to buy'}${left != null ? (left > 0 ? ` · next restock in ${mmss(left)}` : ' · restocking…') : ''}`
       : `<span class="bad">PC's game disconnected</span>: ${esc(hb.why)}`;
     const pics = showPics();
-    $('items').innerHTML = fresh && hb.ok && hb.items?.length ? hb.items.map(([n, q, img]) => `<span>${pics && img ? `<img src="https://mg-api.ariedam.fr/assets/sprites/${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}${esc(n)} ×${esc(q)}</span>`).join('') : '';
+    // the list is only redrawn when it changes (redrawing every second made the pictures flicker)
+    const itemsHtml = fresh && hb.ok && hb.items?.length ? hb.items.map(([n, q, img]) => `<span>${pics && img ? `<img src="https://mg-api.ariedam.fr/assets/sprites/${esc(img)}" alt="" onerror="this.remove()">` : ''}${esc(n)} ×${esc(q)}</span>`).join('') : '';
+    if (itemsHtml !== lastItems) { lastItems = itemsHtml; $('items').innerHTML = itemsHtml; }
     $('buy').disabled = !(linked && fresh && hb.ok && !hb.busy && hb.units > 0) || !!pending || (doneAt && hb.recv < doneAt);
+    // something to buy: the button pulses (like the 🛒 button in the game) and the tab title shows the count
+    const can = !$('buy').disabled;
+    $('buy').classList.toggle('ready', can);
+    document.title = can ? `🛒 ${hb.units} to buy · MG Buy` : 'MG Buy';
     $('buy').textContent = fresh && hb.ok && hb.units ? `Buy on PC (${hb.units})` : 'Buy on PC';
     $('reconnect').disabled = !(linked && fresh && !hb.ok) || !!pending;
     if (hb?.res && !pending && !$('res').dataset.mine) $('res').textContent = `Last buy, ${ago(hb.res.at)}: ${hb.res.text}`;
