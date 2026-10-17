@@ -42,7 +42,7 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.3</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.4</small></h1>
   <div id="note" class="muted"></div>
   <section class="card" id="all" hidden>
     <div id="allstate" class="state"></div>
@@ -335,11 +335,17 @@ const relay = {
   // the saved codes (older versions kept one, under mglhRemoteCode)
   let codes = []; try { codes = JSON.parse(store.get('mglhRemoteCodes', '[]')); } catch {}
   if (!Array.isArray(codes)) codes = [];
-  { const old = store.get('mglhRemoteCode', ''); if (relay.valid(old) && !codes.includes(old)) codes.push(old); }
+  // (moved over once, then the old entry is deleted, so a PC you remove doesn't come back on the next load)
+  { const old = store.get('mglhRemoteCode', ''); if (relay.valid(old) && !codes.includes(old)) codes.push(old); try { localStorage.removeItem('mglhRemoteCode'); } catch {} }
+  // PCs you removed: a link or bookmark that still carries their code doesn't add them back by itself
+  let removed = []; try { removed = JSON.parse(store.get('mglhRemoteRemoved', '[]')); } catch {}
+  if (!Array.isArray(removed)) removed = [];
+  const saveRemoved = () => store.set('mglhRemoteRemoved', JSON.stringify(removed.slice(-50)));
+  let skipped = [];
   codes = [...new Set(codes.filter(relay.validAny))];
   const saveCodes = () => store.set('mglhRemoteCodes', JSON.stringify(codes));
   // A link (…#mglh-CODE, …#mglhs-A,mglhs-B) adds its codes, then the # part is removed from the address bar
-  { const found = relay.findCodes(location.hash); if (found.length) { found.forEach((c) => { if (!codes.includes(c)) codes.push(c); }); try { history.replaceState(null, '', location.pathname + location.search); } catch {} } }
+  { const found = relay.findCodes(location.hash); if (found.length) { found.forEach((c) => { if (removed.includes(c)) { if (!codes.includes(c)) skipped.push(c); } else if (!codes.includes(c)) codes.push(c); }); try { history.replaceState(null, '', location.pathname + location.search); } catch {} } }
   saveCodes();
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
@@ -359,7 +365,12 @@ const relay = {
       e.index = i;
       e.el.buy.onclick = () => command(e, 'buy');
       if (e.el.rc) e.el.rc.onclick = () => { if (confirm('Reload the game on this PC to reconnect it?')) command(e, 'reconnect'); };
-      el.querySelector('button.x').onclick = () => { if (confirm('Remove this PC from this phone? (You can add it again with its link.)')) { codes = codes.filter((c) => c !== e.code && c !== e.share); saveCodes(); connect(); } };
+      el.querySelector('button.x').onclick = () => {
+        if (!confirm('Remove this PC from this phone? (You can add it again by pasting its link under "Add or share codes".)')) return;
+        codes = codes.filter((c) => c !== e.code && c !== e.share);
+        removed = [...removed.filter((c) => c !== e.code && c !== e.share), e.code, ...(e.share && e.share !== e.code ? [e.share] : [])];
+        saveCodes(); saveRemoved(); connect();
+      };
       $('pcs').appendChild(el);
     });
     $('pair').open = !pcs.length;
@@ -475,6 +486,7 @@ const relay = {
     for (const c of [...codes, ...found]) if (relay.valid(c)) here.add(await relay.shareOf(c));
     const added = found.filter((c) => !codes.includes(c) && !(relay.validShare(c) && here.has(c)));
     codes.push(...added); saveCodes();
+    removed = removed.filter((c) => !found.includes(c)); saveRemoved();
     $('codes').value = ''; $('pairres').textContent = `Added ${added.length} code${added.length === 1 ? '' : 's'}${found.length > added.length ? ` (${found.length - added.length} already here)` : ''}.`;
     connect();
   };
@@ -493,6 +505,10 @@ const relay = {
     if (!confirm('The full link can press Buy and Reconnect on your PCs. Only open it on your own devices. Continue?')) return;
     giveLink(`${base()}#${pcs.map((e) => e.code).join(',')}`, 'Full link');
   };
+  if (skipped.length) {
+    $('note').innerHTML = `This link has ${skipped.length === 1 ? 'a PC' : `${skipped.length} PCs`} you removed from this phone, so ${skipped.length === 1 ? 'it wasn\'t' : 'they weren\'t'} added back. <button id="addback" style="width:auto;min-height:36px;padding:0 12px;margin:6px 0 0">Add back</button>`;
+    $('addback').onclick = () => { codes.push(...skipped.filter((c) => !codes.includes(c))); removed = removed.filter((c) => !skipped.includes(c)); skipped = []; saveCodes(); saveRemoved(); $('note').textContent = ''; connect(); };
+  }
   $('pics').checked = showPics();
   $('pics').onchange = () => { store.set('mglhRemotePics', $('pics').checked ? '1' : '0'); pcs.forEach((e) => { e.lastItems = null; }); draw(); };
   // Back on the page after the phone slept, or back online: drop a dead connection right away and ask for fresh status

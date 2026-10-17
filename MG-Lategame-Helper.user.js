@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.18.3
+// @version      0.18.4
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.18.3';
+const MOD_VERSION = '0.18.4';
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote).

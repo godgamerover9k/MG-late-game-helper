@@ -1,5 +1,11 @@
 # MG Lategame Helper: changelog
 
+## 0.18.4
+- Phone page: a PC removed with ✕ stays removed after reloading the page.
+  - The code saved by versions before 0.18.0 was copied back into the list on every load; it's now moved over once and the old entry is deleted.
+  - Opening a link or bookmark that still carries a removed PC's code doesn't add it back by itself. The page says so, with an "Add back" button.
+  - Pasting the code under "Add or share codes" adds it again as before.
+
 ## 0.18.3
 - 📱 Several people can press Buy on the same PC at once (your phones, people with the Buy-only link, the ntfy app button, the PC itself). There is still only ever one buy at a time, and nothing is bought twice.
   - A press while a buy is running joins it ("Already buying: progress follows") and gets the same progress and result, instead of an error.
