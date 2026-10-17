@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.16.3
+// @version      0.16.4
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -29,7 +29,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.16.3';
+const MOD_VERSION = '0.16.4';
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote). Messages go through ntfy.sh, a free public message relay: the PC mod and the
@@ -74,20 +74,24 @@ const relay = {
     try { return { id: m.id, time: m.time, ...JSON.parse(m.message.slice(RELAY_PREFIX.length)) }; } catch { return null; }
   },
   // Keep listening (a long-lived stream that reconnects by itself). Returns a stop function.
+  // ntfy sends a keepalive every ~45 s; a stream that goes quiet for 75 s (a phone that slept, a dropped network) is
+  // dropped and opened again from the last message seen, instead of hanging silently.
   listen(code, onMsg, since = '1m') {
-    const st = { stopped: false }; let ctrl = null, last = since, wait = 2000;
+    const st = { stopped: false }; let ctrl = null, last = since, wait = 2000, heard = Date.now();
+    const dog = setInterval(() => { if (!st.stopped && Date.now() - heard > 75000) { heard = Date.now(); try { ctrl?.abort(); } catch {} } }, 5000);
     const loop = async () => {
       while (!st.stopped) {
         try {
           ctrl = new AbortController();
           const r = await fetch(`${RELAY}/${code}/json?since=${encodeURIComponent(last)}`, { signal: ctrl.signal });
           if (!r.ok || !r.body) throw new Error('relay ' + r.status);
-          wait = 2000;
+          wait = 2000; heard = Date.now();
           const reader = r.body.getReader(), dec = new TextDecoder();
           let buf = '';
           for (;;) {
             const { value, done } = await reader.read();
             if (done || st.stopped) break;
+            heard = Date.now();
             buf += dec.decode(value, { stream: true });
             let nl;
             while ((nl = buf.indexOf('\n')) >= 0) {
@@ -101,12 +105,12 @@ const relay = {
           }
         } catch (e) { if (st.stopped) break; }
         if (st.stopped) break;
-        const pause = wait; wait = Math.min(60000, wait * 2);
+        const pause = wait; wait = Math.min(30000, wait * 2);
         await new Promise((res) => setTimeout(res, pause));
       }
     };
     if (relay.valid(code)) loop();
-    return () => { st.stopped = true; try { ctrl?.abort(); } catch {} };
+    return () => { st.stopped = true; clearInterval(dog); try { ctrl?.abort(); } catch {} };
   },
 };
 
@@ -1560,7 +1564,7 @@ const STYLE = `
 #mgpc-modal .alrt-list{overflow:auto;min-height:120px;flex:1}
 #mgpc-modal .alrt-sh{display:flex;align-items:center;gap:8px;margin:10px 0 4px;position:sticky;top:0;background:#16181c;padding:4px 0;z-index:1}#mgpc-modal .alrt-bulk{margin-left:auto;display:flex;gap:3px;align-items:center}
 #mgpc-modal .alrt-row{display:flex;align-items:center;gap:8px;padding:4px 2px;border-bottom:1px solid #26292f}
-#mgpc-modal .alrt-name{flex:1;min-width:0}#mgpc-modal .alrt-in{color:#7bd88f;font-weight:600;font-size:12px}
+#mgpc-modal .alrt-name{flex:1;min-width:0}#mgpc-modal .rar{font-size:12px;font-weight:700;margin-left:4px}#mgpc-modal .alrt-in{color:#7bd88f;font-weight:600;font-size:12px}
 #mgpc-modal .alrt-seg{display:inline-flex;border:1px solid #474b55;border-radius:8px;overflow:hidden;flex:0 0 auto}
 #mgpc-modal .alrt-seg button{border:0;border-radius:0;background:#23262c;padding:4px 9px;margin:0;font-size:15px;opacity:.55}
 #mgpc-modal .alrt-seg button.on{background:#3d5a8a;opacity:1}#mgpc-modal .alrt-seg.dflt button.on{background:#344156;opacity:.8}
@@ -2944,11 +2948,14 @@ let onRareRing = null; // set by the phone remote: also sends rare alerts to the
 // Item picture: the live data's own sprite URL, else mg-api's folder pattern (seeds/, items/, decor/, pets/ for eggs)
 const SPRITE_DIR = { Seed: 'seeds', Tool: 'items', Decor: 'decor', Egg: 'pets' };
 const SPRITE_NAME = { OrangeTulip: 'Tulip' }; // seeds whose picture has a different name (from the plants data)
-function shopImg(i, size = 36) {
+function shopImgUrl(i) {
   const unwrap = (o) => (o && typeof o === 'object' && o.data && !Array.isArray(o.data) ? o.data : o);
   const live = i.itemType === 'Seed' ? unwrap(liveData?.plants)?.[i.id]?.seed?.sprite
     : (unwrap(liveData?.items)?.[i.id] ?? unwrap(liveData?.decors)?.[i.id] ?? unwrap(liveData?.eggs)?.[i.id])?.sprite;
-  const url = live || (SPRITE_DIR[i.itemType] ? `https://mg-api.ariedam.fr/assets/sprites/${SPRITE_DIR[i.itemType]}/${encodeURIComponent(SPRITE_NAME[i.id] ?? i.id)}.png` : '');
+  return live || (SPRITE_DIR[i.itemType] ? `https://mg-api.ariedam.fr/assets/sprites/${SPRITE_DIR[i.itemType]}/${encodeURIComponent(SPRITE_NAME[i.id] ?? i.id)}.png` : '');
+}
+function shopImg(i, size = 36) {
+  const url = shopImgUrl(i);
   return `<span class="pimg" style="width:${size}px;height:${size}px">${url ? `<img src="${esc(url)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
 }
 // Everything a shop can sell, even while it's empty (weather shops between weathers): what it has now, what the mod
@@ -3453,6 +3460,11 @@ const alertDefault = (i) => {
 };
 const alertMode = (i) => { const m = (settings.rareAlertModes ?? {})[i.id]; return ALERT_MODES.includes(m) ? m : alertDefault(i); };
 const alertWanted = (i) => alertMode(i) !== 'off';
+// Rarity in the game's colours (Celestial in a rainbow)
+const RARITY_COLOR = { Common: '#c9c9c9', Uncommon: '#67bd4d', Rare: '#3a8fe0', Legendary: '#ffc734', Mythic: '#b45ad1', Mythical: '#b45ad1', Divine: '#ff7835' };
+const rarityTag = (r) => !r ? '' : r === 'Celestial'
+  ? ' <span class="rar" style="background:linear-gradient(90deg,#ff5a5a,#ffb84d,#f5e05a,#6ad97a,#5ab8ff,#b07aff);-webkit-background-clip:text;background-clip:text;color:transparent">Celestial</span>'
+  : ` <span class="rar" style="color:${RARITY_COLOR[r] ?? '#9a9da5'}">${esc(r)}</span>`;
 const ALERT_ICON = { off: '🔕', once: '🔔', repeat: '🔁' };
 const ALERT_WORD = { off: 'No alert', once: 'Alert once per restock', repeat: 'Alert again until bought (and on your phone)' };
 function setAlertMode(id, mode) {
@@ -3486,8 +3498,9 @@ function openAlertMenu() {
       const items = shopCatalog(sh).filter((i) => (!needle || String(pretty(i.name)).toLowerCase().includes(needle) || String(i.id).toLowerCase().includes(needle))
         && (want === 'all' || (want === 'on' && alertMode(i) !== 'off') || (want === 'repeat' && alertMode(i) === 'repeat') || (want === 'set' && (settings.rareAlertModes ?? {})[i.id] != null)));
       if (!items.length) return '';
+      items.sort((x, y) => rarityRank(itemRarity(y)) - rarityRank(itemRarity(x)) || String(pretty(x.name)).localeCompare(String(pretty(y.name))));
       return `<div class="alrt-shop"><div class="alrt-sh"><b>${esc(shopLabel(sh.key))}</b>${sh.closed ? ' <span class="muted">closed now</span>' : ''}<span class="alrt-bulk muted">all: ${ALERT_MODES.map((md) => `<button class="mini" data-bulk="${md}" data-shop="${esc(sh.key)}" title="${esc(ALERT_WORD[md])} for every item listed here">${ALERT_ICON[md]}</button>`).join('')}</span></div>
-        ${items.map((i) => `<div class="alrt-row">${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${itemRarity(i) ? ` <span class="muted">${esc(itemRarity(i))}</span>` : ''}${shopSkip(i) ? ` <span class="muted">· ${esc(SKIP_LABEL[shopSkip(i)] || 'never bought')}</span>` : ''}${i.left > 0 ? ` <b class="alrt-in">in stock ×${i.left}</b>` : ''}</span>${seg(i)}</div>`).join('')}</div>`;
+        ${items.map((i) => `<div class="alrt-row">${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${rarityTag(itemRarity(i))}${shopSkip(i) ? ` <span class="muted">· ${esc(SKIP_LABEL[shopSkip(i)] || 'never bought')}</span>` : ''}${i.left > 0 ? ` <b class="alrt-in">in stock ×${i.left}</b>` : ''}</span>${seg(i)}</div>`).join('')}</div>`;
     }).join('') || '<div class="muted">No items match.</div>';
   };
   m.addEventListener('input', (e) => { if (e.target === q) draw(); });
@@ -4311,10 +4324,18 @@ function remoteStatusText() {
 function remoteStatus() {
   const ready = net.readiness();
   let c = null; try { c = collectShopBuy(); } catch {}
-  const items = (c?.items ?? []).slice(0, 40).map((i) => [String(pretty(i.name)).slice(0, 28), i.left]);
-  return { t: 'hb', v: MOD_VERSION, ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
+  // [name, amount, picture]; pictures from the sprite server are sent without its address (the page adds it back)
+  const SPR = 'https://mg-api.ariedam.fr/assets/sprites/';
+  const items = (c?.items ?? []).slice(0, 36).map((i) => { const u = shopImgUrl(i); return [String(pretty(i.name)).slice(0, 28), i.left, u.startsWith(SPR) ? u.slice(SPR.length, SPR.length + 60) : '']; });
+  const hb = { t: 'hb', v: MOD_VERSION, ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
     units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying,
     res: lastBuyResult ? { at: lastBuyResult.at, text: lastBuyResult.text.slice(0, 900) } : null, at: Date.now() };
+  // ntfy takes messages up to 4 KB: shrink if needed (the last result's text first, then pictures, then the list)
+  const size = () => new TextEncoder().encode(RELAY_PREFIX + JSON.stringify(hb)).length;
+  if (size() > 3800 && hb.res) hb.res.text = hb.res.text.slice(0, 250);
+  if (size() > 3800) hb.items = hb.items.map(([n, q]) => [n, q, '']);
+  while (size() > 3800 && hb.items.length > 5) hb.items.pop();
+  return hb;
 }
 async function remoteHeartbeat() {
   if (!settings.featRemote || !relay.valid(settings.remoteCode)) return;
