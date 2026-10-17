@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.17.2
+// @version      0.18.0
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -23,27 +23,33 @@
 //  - Arie's Mod / Ariedam64 (https://github.com/Ariedam64): live game data and sprites from mg-api.ariedam.fr,
 //    ability badge colours, the PurchaseShopItem viewMode fix (mg-afk-android) and the LogItem target format
 //    (MG-Websocket-Helper).
-//  - Phone remote messages go through ntfy.sh (https://ntfy.sh), a free public message relay.
+//  - Phone remote messages go through the public MQTT brokers of HiveMQ (broker.hivemq.com) and EMQX (broker.emqx.io),
+//    encrypted; optional phone-app notifications through ntfy.sh (https://ntfy.sh).
 //  - Everything else (the pet rules, teams, planner and UI) is this mod's own.
 
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.17.2';
+const MOD_VERSION = '0.18.0';
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote).
 // A browser can't accept connections, so the PC and the phone can't talk to each other directly: both connect out to a
-// public MQTT message broker (HiveMQ and EMQX, both at once, so one being down doesn't matter) over a secure websocket
-// and meet on a secret topic named after the pairing code. No accounts and no daily message limit. The PC's status is
-// kept on the broker ("retained"), so the phone sees it the moment it connects, and if the PC's tab closes the broker
-// itself marks it offline ("last will"). Only short JSON messages are sent: commands from the phone (buy / reconnect /
-// ping / stop) and the PC's status and results. Anyone who knows the code could press Buy for you, so it's long and
-// random; "New code" on the PC replaces it.
-// Phone notifications through the ntfy app (optional) still go through ntfy.sh, a few a day.
+// public MQTT message broker (HiveMQ and EMQX, both at once, so one being down doesn't matter) over a secure websocket.
+// What the brokers (and anyone else listening on them) can see: a topic name that is a hash of the code, and messages
+// that are encrypted and signed (AES-GCM) with keys made from the code. The code itself never leaves the PC or the phone.
+// Two keys per pairing:
+//  - the owner key, from the pairing code ("mglh-…"): the owner's phone; may Buy, Reconnect, Stop and see the last buy;
+//  - the share key, from the share code ("mglhs-…", made from the pairing code by a one-way hash, so it can't be turned
+//    back into the pairing code): people the owner shared a Buy link with; may only press Buy and see the status, and
+//    only while the PC owner allows it.
+// Only short JSON messages are sent: the phone's commands, the PC's status and the results. The PC's status is kept on
+// the broker ("retained"), so a phone sees it the moment it connects, and if the PC's tab closes the broker itself marks
+// it offline ("last will").
+// Phone notifications through the ntfy app (optional) go through ntfy.sh, on topics that are also hashes of the code.
 // ---------------------------------------------------------------------------
 const RELAY = 'https://ntfy.sh';
-const RELAY_PREFIX = 'mglh1 ';
+const RELAY_PREFIX = 'mglh2 ';
 const MQTT_BROKERS = ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt'];
 
 // A small MQTT 3.1.1 client (QoS 0) over a websocket: connect (with an optional last will), subscribe, publish, keepalive,
@@ -66,6 +72,7 @@ function mqttClient(url, { clientId, will, onMessage, onState, WS }) {
       const tl = (body[0] << 8) | body[1];
       const topic = dec.decode(body.slice(2, 2 + tl));
       const start = 2 + tl + (((head >> 1) & 3) > 0 ? 2 : 0);
+      if (body.length - start > 16384) return; // ours are a few KB at most
       try { onMessage?.(topic, dec.decode(body.slice(start)), (head & 1) === 1); } catch (e) { console.error('[mglh relay]', e); }
     }
   };
@@ -77,7 +84,9 @@ function mqttClient(url, { clientId, will, onMessage, onState, WS }) {
       if (buf.length < 2) return;
       let len = 0, mult = 1, i = 1, ok = false;
       for (; i < buf.length && i < 5; i++) { len += (buf[i] & 127) * mult; mult *= 128; if (!(buf[i] & 128)) { ok = true; i++; break; } }
-      if (!ok || buf.length < i + len) return;
+      if (!ok) { if (buf.length >= 5) { try { ws?.close(); } catch {} } return; }
+      if (len > 1048576) { try { ws?.close(); } catch {} return; } // a broken or hostile stream: start over
+      if (buf.length < i + len) return;
       handle(buf[0], buf.slice(i, i + len));
       buf = buf.slice(i + len);
     }
@@ -112,70 +121,148 @@ function mqttClient(url, { clientId, will, onMessage, onState, WS }) {
 }
 
 const relay = {
+  ABC: 'abcdefghijkmnpqrstuvwxyz23456789',
   newCode() {
-    const abc = 'abcdefghijkmnpqrstuvwxyz23456789';
-    const r = new Uint32Array(14); crypto.getRandomValues(r);
-    return 'mglh-' + [...r].map((x) => abc[x % abc.length]).join('');
+    const r = new Uint32Array(14); relay.crypto().getRandomValues(r);
+    return 'mglh-' + [...r].map((x) => relay.ABC[x % 32]).join('');
   },
-  valid: (code) => typeof code === 'string' && /^mglh-[a-z0-9]{8,40}$/.test(code),
-  // Connect to the brokers for this code. onMsg(msg, { retained }) gets each message once (both brokers carry it).
-  // will: a status message the brokers publish (and keep) if this side disappears without saying goodbye.
-  // Returns { send(obj, { retain }), connected (how many brokers), kick(), close() }.
-  connect(code, { onMsg, onState, will } = {}) {
+  valid: (code) => typeof code === 'string' && /^mglh-[a-z0-9]{8,40}$/.test(code), // a pairing code (owner)
+  validShare: (code) => typeof code === 'string' && /^mglhs-[a-z0-9]{20}$/.test(code), // a share code (Buy only)
+  validAny: (code) => relay.valid(code) || relay.validShare(code),
+  validTopic: (t) => typeof t === 'string' && /^mglh-[0-9a-f]{24}$/.test(t),
+  // pairing codes and share codes in any text (a link, a pasted list)
+  findCodes: (text) => [...new Set(String(text || '').toLowerCase().match(/mglhs?-[a-z0-9]{8,40}/g) || [])].filter(relay.validAny),
+
+  // ---- crypto (Web Crypto: SHA-256, AES-GCM) ----
+  crypto() { return (typeof W !== 'undefined' && W.crypto?.subtle ? W.crypto : null) || globalThis.crypto; },
+  async sha(text) { return new Uint8Array(await relay.crypto().subtle.digest('SHA-256', new TextEncoder().encode(text))); },
+  hex: (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join(''),
+  b64(u8) { let s = ''; for (const b of u8) s += String.fromCharCode(b); return btoa(s); },
+  unb64(s) { const t = atob(s); const u8 = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u8[i] = t.charCodeAt(i); return u8; },
+  async aesKey(label) { return relay.crypto().subtle.importKey('raw', await relay.sha(label), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']); },
+  // the share code for a pairing code (one-way: the pairing code can't be worked out from it)
+  async shareOf(code) { const h = await relay.sha('mglh-share:' + code); return 'mglhs-' + [...h.slice(0, 20)].map((b) => relay.ABC[b % 32]).join(''); },
+  // Everything about one code: its topic, its keys, and (pairing codes only) its ntfy topics
+  async keys(code) {
+    const own = relay.valid(code);
+    if (!own && !relay.validShare(code)) return null;
+    const share = own ? await relay.shareOf(code) : code;
+    const h = async (label) => relay.hex(await relay.sha(label));
+    return {
+      code, own, share,
+      topic: 'mglh2/' + (await h('mglh-topic:' + share)).slice(0, 32),
+      s: await relay.aesKey('mglh-key-share:' + share),
+      o: own ? await relay.aesKey('mglh-key-owner:' + code) : null,
+      ntfyAlerts: own ? 'mglh-' + (await h('mglh-ntfy-alerts:' + code)).slice(0, 24) : null,
+      ntfyCmd: own ? 'mglh-' + (await h('mglh-ntfy-cmd:' + code)).slice(0, 24) : null,
+    };
+  },
+  // "mglh2 " + "o" or "s" (which key) + base64(iv + AES-GCM ciphertext). The topic and the key letter are signed along
+  // with the message, so a message can't be moved to another pairing or passed off under the other key.
+  async seal(k, via, obj) {
+    const key = via === 'o' ? k.o : k.s;
+    if (!key) throw new Error('no key');
+    const iv = new Uint8Array(12); relay.crypto().getRandomValues(iv);
+    const ct = new Uint8Array(await relay.crypto().subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(via + k.topic) }, key, new TextEncoder().encode(JSON.stringify(obj))));
+    const all = new Uint8Array(12 + ct.length); all.set(iv); all.set(ct, 12);
+    return RELAY_PREFIX + via + relay.b64(all);
+  },
+  // → { m, via } for a message made with one of our keys, otherwise null (wrong code, tampered with, or not ours)
+  async unseal(k, text) {
+    if (typeof text !== 'string' || text.length > 16000 || !text.startsWith(RELAY_PREFIX)) return null;
+    const via = text[RELAY_PREFIX.length];
+    const key = via === 'o' ? k.o : via === 's' ? k.s : null;
+    if (!key) return null;
+    try {
+      const all = relay.unb64(text.slice(RELAY_PREFIX.length + 1));
+      if (all.length < 29) return null;
+      const pt = await relay.crypto().subtle.decrypt({ name: 'AES-GCM', iv: all.slice(0, 12), additionalData: new TextEncoder().encode(via + k.topic) }, key, all.slice(12));
+      const m = JSON.parse(new TextDecoder().decode(pt));
+      return m && typeof m === 'object' && !Array.isArray(m) && typeof m.t === 'string' ? { m, via } : null;
+    } catch { return null; }
+  },
+
+  // Connect to the brokers for one or more codes (one connection per broker for all of them).
+  // onMsg(msg, { retained, via, code, part }) gets each message once (both brokers carry it); via is the key it was
+  // made with ('o' owner, 's' share); part is '/s' (status), '/r' (last buy, owner only) or '/m' (commands, results).
+  // will (one code only): a status message the brokers publish (and keep) if this side disappears without a goodbye.
+  // Returns { send(obj, { retain, code, via }), connected (how many brokers), ready, kick(), close() }.
+  connect(codes, { onMsg, onState, will } = {}) {
     const g = typeof globalThis !== 'undefined' ? globalThis : {};
     const W0 = typeof W !== 'undefined' ? W : g;
     const WS = W0.__mglhWS || g.__mglhWS || W0.WebSocket || g.WebSocket;
     const brokers = W0.__mglhBrokers || g.__mglhBrokers || MQTT_BROKERS;
-    const base = `mglh/${code}`, seen = new Set(), seenList = [];
-    const clientId = 'mglh-' + Math.random().toString(36).slice(2, 12);
-    const topicOf = (obj) => (obj.t === 'hb' ? `${base}/s` : `${base}/m`);
-    const clients = brokers.map((url) => mqttClient(url, {
-      clientId, WS, onState: () => { try { onState?.(clients.filter((c) => c.connected).length); } catch {} },
-      will: will ? { topic: topicOf(will), payload: RELAY_PREFIX + JSON.stringify({ ...will, mid: 'will-' + clientId }) } : null,
-      onMessage: (topic, text, retained) => {
-        if (!text.startsWith(RELAY_PREFIX)) return;
-        let m; try { m = JSON.parse(text.slice(RELAY_PREFIX.length)); } catch { return; }
-        if (!m || !m.mid) return;
-        const key = m.mid + (retained ? ':r' : '');
-        if (seen.has(key)) return;
-        seen.add(key); seenList.push(key); if (seenList.length > 400) seen.delete(seenList.shift());
-        onMsg?.(m, { retained });
-      },
-    }));
-    clients.forEach((c) => c.subscribe(`${base}/#`));
+    const list = [...new Set((Array.isArray(codes) ? codes : [codes]).filter(relay.validAny))];
+    const byTopic = new Map(), byCode = new Map(), seen = new Set(), seenList = [];
+    const rid = new Uint8Array(6); relay.crypto().getRandomValues(rid);
+    const clientId = 'mglh-' + relay.hex(rid);
+    let clients = [], closed = false, txChain = Promise.resolve(), rxChain = Promise.resolve(), rate = { at: 0, n: 0 };
+    const partOf = (obj) => (obj.t === 'hb' ? '/s' : obj.t === 'last' ? '/r' : '/m');
+    const count = () => clients.filter((c) => c.connected).length;
+    const onMessage = (topic, text, retained) => {
+      const k = byTopic.get(topic.slice(0, 'mglh2/'.length + 32));
+      if (!k) return;
+      // a flood (someone spamming the topic): drop what's over 40 messages a second instead of trying to read it all
+      const now = Date.now(); if (now - rate.at > 1000) rate = { at: now, n: 0 };
+      if (++rate.n > 40) return;
+      rxChain = rxChain.then(async () => {
+        const r = await relay.unseal(k, text);
+        if (!r || typeof r.m.mid !== 'string') return;
+        const id = k.topic + r.m.mid + (retained ? ':r' : '');
+        if (seen.has(id)) return;
+        seen.add(id); seenList.push(id); if (seenList.length > 600) seen.delete(seenList.shift());
+        onMsg?.(r.m, { retained, via: r.via, code: k.code, part: topic.slice(k.topic.length) });
+      }).catch((e) => console.error('[mglh relay]', e));
+    };
+    const ready = Promise.all(list.map((c) => relay.keys(c))).then(async (ks) => {
+      if (closed) return;
+      ks.filter(Boolean).forEach((k) => { byTopic.set(k.topic, k); byCode.set(k.code, k); });
+      const k0 = byCode.get(list[0]);
+      const willMsg = will && k0 ? { topic: k0.topic + partOf(will), payload: await relay.seal(k0, 's', { ...will, mid: 'will-' + clientId, ts: Date.now() }) } : null;
+      if (closed) return;
+      clients = brokers.map((url) => mqttClient(url, { clientId, WS, will: willMsg, onMessage, onState: () => { try { onState?.(count()); } catch {} } }));
+      byTopic.forEach((k) => clients.forEach((c) => c.subscribe(k.topic + '/#')));
+    });
     return {
-      send(obj, { retain = false } = {}) {
-        const msg = { ...obj, mid: Math.random().toString(36).slice(2, 12) + Date.now().toString(36) };
-        const text = RELAY_PREFIX + JSON.stringify(msg);
-        return clients.map((c) => c.publish(topicOf(msg), text, retain)).some(Boolean);
+      ready,
+      // sends (encrypted) once the keys are ready; true if at least one broker is connected right now
+      send(obj, { retain = false, code = list[0], via } = {}) {
+        const k = byCode.get(code);
+        if (!k || !count()) return false;
+        const v = via || (k.own ? 'o' : 's');
+        const mid = relay.hex(relay.crypto().getRandomValues(new Uint8Array(8)));
+        const msg = { ...obj, mid, ts: Date.now() };
+        txChain = txChain.then(async () => {
+          const text = await relay.seal(k, v, msg);
+          clients.forEach((c) => c.publish(k.topic + partOf(msg), text, retain));
+        }).catch((e) => console.error('[mglh relay]', e));
+        return true;
       },
-      get connected() { return clients.filter((c) => c.connected).length; },
+      get connected() { return count(); },
       kick() { clients.forEach((c) => c.kick()); },
-      close() { clients.forEach((c) => c.close()); },
+      close() { closed = true; clients.forEach((c) => c.close()); },
     };
   },
+
   // ---- ntfy.sh: only for the optional ntfy phone app (notifications, and its "Buy on PC" / "Stop" buttons) ----
-  // A notification on topic "<code>-a"; its buttons post a command to topic "<code>", which the PC also listens to.
-  async notify(code, { title, message, priority = 3, tags = [], actions = [] }) {
-    if (!relay.valid(code)) return false;
+  // Notifications go to the alerts topic; the buttons post a command, encrypted with the owner key, to the command topic.
+  async notify(topic, { title, message, priority = 3, tags = [], actions = [] }) {
+    if (!relay.validTopic(topic)) return false;
     try {
-      const r = await fetch(`${RELAY}/`, { method: 'POST', body: JSON.stringify({ topic: code + '-a', title, message, priority, tags, actions }) });
+      const r = await fetch(`${RELAY}/`, { method: 'POST', body: JSON.stringify({ topic, title, message, priority, tags, actions }) });
       return r.ok;
     } catch { return false; }
   },
-  parse(m) {
-    if (typeof m?.message !== 'string' || !m.message.startsWith(RELAY_PREFIX)) return null;
-    try { return { id: m.id, time: m.time, ...JSON.parse(m.message.slice(RELAY_PREFIX.length)) }; } catch { return null; }
-  },
-  // Listen on the ntfy topic (a long-lived stream that reconnects by itself; dropped and reopened after 75 s of silence)
-  ntfyListen(code, onMsg, since = '1m') {
+  // Listen on an ntfy topic (a long-lived stream that reconnects by itself; dropped and reopened after 75 s of silence).
+  // onText(text) gets each message's text; reading it is up to the caller (relay.unseal).
+  ntfyListen(topic, onText, since = '1m') {
     const st = { stopped: false }; let ctrl = null, last = since, wait = 2000, heard = Date.now();
     const dog = setInterval(() => { if (!st.stopped && Date.now() - heard > 75000) { heard = Date.now(); try { ctrl?.abort(); } catch {} } }, 5000);
     const loop = async () => {
       while (!st.stopped) {
         try {
           ctrl = new AbortController();
-          const r = await fetch(`${RELAY}/${code}/json?since=${encodeURIComponent(last)}`, { signal: ctrl.signal });
+          const r = await fetch(`${RELAY}/${topic}/json?since=${encodeURIComponent(last)}`, { signal: ctrl.signal });
           if (!r.ok || !r.body) throw new Error('relay ' + r.status);
           wait = 2000; heard = Date.now();
           const reader = r.body.getReader(), dec = new TextDecoder();
@@ -185,14 +272,14 @@ const relay = {
             if (done || st.stopped) break;
             heard = Date.now();
             buf += dec.decode(value, { stream: true });
+            if (buf.length > 65536) buf = buf.slice(-16384);
             let nl;
             while ((nl = buf.indexOf('\n')) >= 0) {
               const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
               let m = null; try { m = JSON.parse(line); } catch {}
-              if (m?.event !== 'message') continue;
+              if (m?.event !== 'message' || typeof m.message !== 'string') continue;
               last = m.id;
-              const p = relay.parse(m);
-              if (p) { try { onMsg(p); } catch (e) { console.error('[mglh relay]', e); } }
+              try { onText(m.message); } catch (e) { console.error('[mglh relay]', e); }
             }
           }
         } catch (e) { if (st.stopped) break; }
@@ -201,7 +288,7 @@ const relay = {
         await new Promise((res) => setTimeout(res, pause));
       }
     };
-    if (relay.valid(code)) loop();
+    if (relay.validTopic(topic)) loop();
     return () => { st.stopped = true; clearInterval(dog); try { ctrl?.abort(); } catch {} };
   },
 };
@@ -1199,8 +1286,10 @@ const DEFAULT_SETTINGS = {
   buyOff: [], // Buy everything: items you switched off ('shop:itemId')
   sellTeam: 'dust', // team the sell dialog swaps in: 'dust' (refund + dust boost) or 'refund'
   featRemote: false, // 📱 Phone remote: the phone can press Buy (and Reconnect) on this PC through the relay
-  remoteCode: null, // pairing code (secret relay topic), made when the remote is first switched on
-  remoteAlerts: true, // rare alerts and Buy results also go to the ntfy phone app (topic <code>-a)
+  remoteCode: null, // pairing code (the relay topic and keys are made from it), made when the remote is first switched on
+  remoteAlerts: true, // rare alerts and Buy results also go to the ntfy phone app (on a topic made from the code)
+  remoteShare: false, // people with the Buy-only link (share code) may press Buy on this PC
+  remoteName: null, // name shown on phones for this PC (optional)
   featRareAlert: true, // 🔔 alert when a rare item is in a shop
   rareAlertMin: 'Divine', // lowest rarity that alerts: Mythic / Divine / Celestial
   rareAlertSound: true, // chime with the alert
@@ -2883,9 +2972,11 @@ function renderSettings(bar, body) {
       ${list('retiredEggs', 'Eggs left out of the egg plan:')}</details>
     <details data-sec="remote"${secOpen('remote')}><summary><b>📱 Phone remote</b></summary>
       ${chk('featRemote', 'Let my phone press Buy and Reconnect on this PC')}
-      ${settings.featRemote && settings.remoteCode ? `<div>Pairing code: <code style="user-select:all">${esc(settings.remoteCode)}</code> <button class="mini" data-a="remotecopy">Copy phone link</button> <button class="mini" data-a="remotenew" title="Make a new code: phones paired with the old one stop working">New code</button> <span class="muted">${esc(remoteStatusText())}</span></div>
-      ${chk('remoteAlerts', 'Also send 🔁 repeating alerts and Buy results to the ntfy phone app')} <span class="muted">(subscribe to <code style="user-select:all">${esc(settings.remoteCode)}-a</code> in the app)</span>` : ''}
-      <div class="muted">Open the copied link on your phone: a small page with your PC's shop status and a Buy button (nothing to install; bookmark it). It works while this game is open on the PC. Messages go through public MQTT relay servers (HiveMQ and EMQX, no account or limit); keep the link to yourself (anyone with it can press Buy for you; "New code" makes old links stop working). Nothing reconnects by itself: Reconnect only runs when you press it on the phone.</div></details>
+      ${settings.featRemote && settings.remoteCode ? `<div>Pairing code: <code style="user-select:all">${esc(settings.remoteCode)}</code> <button class="mini" data-a="remotecopy">Copy phone link</button> <button class="mini" data-a="remotenew" title="Make a new code: phones paired with the old one, and Buy-only links, stop working">New code</button> <span class="muted">${esc(remoteStatusText())}</span></div>
+      <label>Name shown on phones <input type="text" data-f="remoteName" value="${esc(settings.remoteName || '')}" maxlength="24" placeholder="(optional)" style="width:130px"></label>
+      ${chk('remoteShare', 'Let people with my Buy-only link press Buy on this PC')}${settings.remoteShare && remoteKeys ? ` <button class="mini" data-a="remotesharecopy">Copy Buy-only link</button>` : ''}
+      ${chk('remoteAlerts', 'Also send 🔁 repeating alerts and Buy results to the ntfy phone app')}${remoteKeys?.ntfyAlerts ? ` <span class="muted">(subscribe to <code style="user-select:all">${esc(remoteKeys.ntfyAlerts)}</code> in the app)</span>` : ''}` : ''}
+      <div class="muted">Open the copied link on your phone: a small page with your PC's shop status and a Buy button (nothing to install; bookmark it). It works while this game is open on the PC. The PC only takes these commands from the phone: Buy (the same as pressing Buy everything here), Reconnect (only while the game here is disconnected), Stop (repeating alerts) and a status refresh; the phone only gets what's to buy and the time to the next restock. Messages go through public MQTT relay servers (HiveMQ and EMQX, no account or limit), encrypted with keys made from the code, which never leaves your PC and phone. Keep the phone link to yourself; "New code" makes old links stop working. Nothing reconnects by itself: Reconnect only runs when you press it on the phone.<br>The Buy-only link is for other people: with it they can only press Buy (when sharing is on) and see what's to buy here. It can't be turned back into your pairing code. Switching sharing off stops them; "New code" also makes the link stop working.</div></details>
     <details data-sec="shop"${secOpen('shop')}><summary><b>🛒 Shop</b></summary>
       ${chk('buyPotions', 'Also buy XP and Hunger potions (Magic Dust)')}
       ${chk('featRareAlert', '🔔 Alert when a rare item is in stock')}
@@ -2928,6 +3019,9 @@ function onChange(e) {
     settings[k] = t.type === 'checkbox' ? t.checked : t.type === 'number' || t.type === 'range' ? Math.max(0, +t.value || 0) : (t.value || null);
     if (k === 'collectMutations') settings.collectUniqueMutated = t.checked; // one switch for the whole Gold/Rainbow collection
     if (k === 'featRemote') { if (t.checked && !relay.valid(settings.remoteCode)) settings.remoteCode = relay.newCode(); setTimeout(() => remoteRestart(), 0); }
+    if (k === 'remoteAlerts') setTimeout(() => remoteRestart(), 0);
+    if (k === 'remoteName') settings.remoteName = settings.remoteName ? String(settings.remoteName).slice(0, 24) : null;
+    if (k === 'remoteShare' || k === 'remoteName') setTimeout(() => remoteHeartbeat(), 0);
     if (k === 'rareAlertDesktop' && t.checked) { try { if (W.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch {} }
   } else if (t.dataset.list) {
     settings[t.dataset.list] = t.value.split(',').map((s) => s.trim()).filter(Boolean);
@@ -2995,6 +3089,7 @@ function onClick(e) {
   if (a === 'tabreset') { settings.tabOrder = []; saveSettings(); render(); return; }
   if (a === 'chimetest') { chime(); return; }
   if (a === 'remotenew') { settings.remoteCode = relay.newCode(); saveSettings(); remoteRestart(); render(); return; }
+  if (a === 'remotesharecopy') { const link = remoteShareLink(); if (!link) return; try { navigator.clipboard.writeText(link); toast('Buy-only link copied: whoever opens it can press Buy on this PC while sharing is on, and see what\'s to buy here.', { key: 'remote', ms: 7000 }); } catch { prompt('Buy-only link:', link); } return; }
   if (a === 'remotecopy') { const link = remotePageLink(); try { navigator.clipboard.writeText(link); toast('Phone link copied: open it on your phone (send it to yourself, or type it in).', { key: 'remote', ms: 6000 }); } catch { prompt('Phone link:', link); } return; }
   if (a === 'alertmenu') { openAlertMenu(); return; }
   if (a === 'reset') { settings = { ...DEFAULT_SETTINGS, pinned: settings.pinned, gardenOwner: settings.gardenOwner }; saveSettings(); analyze(); render(); }
@@ -4407,52 +4502,80 @@ whenRoom();
 LOG(`v${MOD_VERSION} ready — press Alt+P or click 🐾 (bottom-left).`);
 
 // ---------- 📱 Phone remote, PC side ----------
-// Connected to the relay (two public MQTT brokers) on the pairing code. Answers the phone's commands:
-//  - buy: runs Buy everything once (same list, checks and rules as pressing Buy here), then reports the result;
-//  - reconnect: only when this PC's game is disconnected (e.g. the phone took the session over): reloads the page;
-//  - ping: sends the status straight away;  - stop: silences repeating alerts until the next restock.
-// Each command runs once. The status ("hb") is kept on the broker, so a phone sees it as soon as it opens the page; it's
-// refreshed every 60 s, on each restock or change in what's to buy, and after every command. If this tab closes, the
-// broker marks the PC offline by itself. Commands from the ntfy app's notification buttons arrive through ntfy.sh.
-let remoteSession = null, remoteNtfyStop = null, remoteSeen = new Set(), remoteLastHb = 0, remoteLastSig = '', remoteBuying = false;
+// Connected to the relay (two public MQTT brokers) on the pairing code. The PC only ever does these, and nothing a phone
+// sends is passed on to the game or used as anything but the name of one of them:
+//  - buy: runs Buy everything once (same list, checks and rules as pressing Buy here: no selling, no credits, no dust
+//    except the potions you allowed), then reports the result;
+//  - reconnect (owner only): only when this PC's game is disconnected (e.g. the phone took the session over): reloads
+//    the page;
+//  - ping: sends the same status as always, straight away;  - stop (owner only): silences repeating alerts until the
+//    next restock.
+// Anything else is ignored. Commands must be made with this PC's keys (see relay.js), are at most 5 minutes old (ntfy
+// app buttons: until they expire, 30 minutes), and each one runs once. People with the share link (Buy only) are only
+// heard while "Let people with my Buy-only link press Buy" is on.
+// The status ("hb") is kept on the broker, so a phone sees it as soon as it opens the page; it's refreshed on each
+// restock or change in what's to buy, and after every command. If this tab closes, the broker marks the PC offline.
+let remoteSession = null, remoteKeys = null, remoteNtfyStop = null, remoteLastHb = 0, remoteLastSig = '', remoteBuying = false, remoteLastPing = 0, remoteLastShareBuy = 0;
+const REMOTE_CMDS = { o: new Set(['buy', 'reconnect', 'ping', 'stop']), s: new Set(['buy', 'ping']) };
+const REMOTE_MAX_AGE = 5 * 60000, REMOTE_APP_MAX_AGE = 30 * 60000;
 // The phone page lives in the mod's GitHub repo (GitHub Pages); the code goes after the #, which never leaves the phone
 const REMOTE_PAGE = 'https://godgamerover9k.github.io/MG-late-game-helper/remote.html';
 const remotePageLink = () => `${REMOTE_PAGE}#${settings.remoteCode}`;
+const remoteShareLink = () => (remoteKeys?.share ? `${REMOTE_PAGE}#${remoteKeys.share}` : '');
+// commands already run (kept in this tab across a reload, so a command can't be run twice by sending it again)
+const remoteSeen = (() => {
+  let ids = [];
+  try { ids = JSON.parse(W.sessionStorage.getItem('mglhRemoteSeen') || '[]'); } catch {}
+  if (!Array.isArray(ids)) ids = [];
+  return {
+    has: (id) => ids.includes(id),
+    add(id) { ids.push(id); if (ids.length > 300) ids = ids.slice(-200); try { W.sessionStorage.setItem('mglhRemoteSeen', JSON.stringify(ids)); } catch {} },
+  };
+})();
 function remoteStatusText() {
   if (!remoteSession) return '';
   const n = remoteSession.connected;
   return n ? `· connected to the relay (${n} of 2 servers)` : '· connecting to the relay…';
 }
+// What the phone sees: whether the game is connected, what's to buy (names, amounts, pictures) and when the next restock
+// is. Nothing else from the game or the PC. People with the Buy-only link see the same (only while sharing is on).
 function remoteStatus() {
   const ready = net.readiness();
   let c = null; try { c = collectShopBuy(); } catch {}
   // [name, amount, picture]; pictures from the sprite server are sent without its address (the page adds it back)
   const SPR = 'https://mg-api.ariedam.fr/assets/sprites/';
   const items = (c?.items ?? []).slice(0, 36).map((i) => { const u = shopImgUrl(i); return [String(pretty(i.name)).slice(0, 28), i.left, u.startsWith(SPR) ? u.slice(SPR.length, SPR.length + 60) : '']; });
-  const hb = { t: 'hb', v: MOD_VERSION, ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
-    units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying,
-    res: lastBuyResult ? { at: lastBuyResult.at, text: lastBuyResult.text.slice(0, 900) } : null, at: Date.now() };
-  // keep the status small (well under the brokers' limits): shorten the last result's text, then pictures, then the list
-  const size = () => new TextEncoder().encode(RELAY_PREFIX + JSON.stringify(hb)).length;
-  if (size() > 3800 && hb.res) hb.res.text = hb.res.text.slice(0, 250);
+  const hb = { t: 'hb', v: MOD_VERSION, name: String(settings.remoteName || '').slice(0, 24), ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
+    units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying, share: !!settings.remoteShare, at: Date.now() };
+  // keep the status small (well under the brokers' limits): pictures go first, then the end of the list
+  const size = () => new TextEncoder().encode(JSON.stringify(hb)).length * 1.4;
   if (size() > 3800) hb.items = hb.items.map(([n, q]) => [n, q, '']);
   while (size() > 3800 && hb.items.length > 5) hb.items.pop();
   return hb;
 }
 const remoteSig = () => { try { const c = collectShopBuy(); return c.restocks + '|' + c.units + '|' + net.readiness().ok; } catch { return ''; } };
+// The status is made with the share key while sharing is on (so Buy-only phones can read it), otherwise with the owner
+// key (Buy-only phones then can't read anything)
 async function remoteHeartbeat() {
   if (!settings.featRemote || !remoteSession) return;
   remoteLastHb = Date.now(); remoteLastSig = remoteSig();
-  remoteSession.send(remoteStatus(), { retain: true });
+  remoteSession.send(remoteStatus(), { retain: true, via: settings.remoteShare ? 's' : 'o' });
 }
-const remoteSend = (obj) => remoteSession?.send(obj);
-async function remoteOnMessage(m) {
-  if (!m || m.t === 'hb' || m.t === 'res') return;
-  const id = m.mid ?? m.id; if (!id || remoteSeen.has(id)) return;
-  remoteSeen.add(id); if (remoteSeen.size > 300) remoteSeen = new Set([...remoteSeen].slice(-150));
-  if (m.time && Date.now() / 1000 - m.time > 90) return; // an ntfy-app button pressed long ago
-  const reply = (text, ok = true) => remoteSend({ t: 'res', re: m.cid ?? id, cmd: m.t, ok, text, at: Date.now() });
-  if (m.t === 'ping') { await remoteHeartbeat(); return; }
+// the last buy's result: owner key only
+const remoteLast = () => { if (lastBuyResult) remoteSession?.send({ t: 'last', res: { at: lastBuyResult.at, text: lastBuyResult.text.slice(0, 900) } }, { retain: true, via: 'o' }); };
+async function remoteOnMessage(m, { via, part = '/m', app = false } = {}) {
+  if (!settings.featRemote || !m || part !== '/m' || !REMOTE_CMDS[via]?.has(m.t)) return; // only these commands, nothing else
+  if (typeof m.mid !== 'string' || remoteSeen.has(m.mid)) return;
+  remoteSeen.add(m.mid);
+  const cid = String(m.cid ?? m.mid).slice(0, 40);
+  const reply = (text, ok = true, extra = {}) => remoteSession?.send({ t: 'res', re: cid, cmd: m.t, ok, text: String(text).slice(0, 900), at: Date.now(), ...extra }, { via });
+  // too old (or from the future): a phone whose clock is far off, or a command sent again later by someone else
+  const now = Date.now(), ts = Number(m.ts);
+  if (!Number.isFinite(ts)) return;
+  if (app) { const exp = Number(m.exp); if (!(exp >= now && exp - ts <= REMOTE_APP_MAX_AGE)) return; }
+  else if (Math.abs(now - ts) > REMOTE_MAX_AGE) { reply(`Not done: this phone's clock and the PC's differ by ${Math.round(Math.abs(now - ts) / 60000)} minutes (5 at most). Set both to the automatic time.`, false); return; }
+  if (via === 's' && !settings.remoteShare) { if (m.t === 'buy') reply("This PC isn't taking Buy from shared links right now.", false); return; }
+  if (m.t === 'ping') { if (now - remoteLastPing > 3000) { remoteLastPing = now; await remoteHeartbeat(); } return; }
   if (m.t === 'stop') { rareStop(); reply('Repeating alerts stopped until the next restock.'); return; }
   if (m.t === 'reconnect') {
     if (net.readiness().ok) { reply('The PC is already connected.', false); return; }
@@ -4465,49 +4588,64 @@ async function remoteOnMessage(m) {
     const ready = net.readiness();
     if (!ready.ok) { reply(`The PC can't buy right now: ${ready.reason || 'not connected'}.`, false); return; }
     if (shopBusy || remoteBuying) { reply('The PC is already buying.', false); return; }
+    if (via === 's' && now - remoteLastShareBuy < 10000) { reply('Just bought; try again in a few seconds.', false); return; }
     const c = collectShopBuy();
     if (!c.items.length) { reply('Nothing to buy right now.', false); remoteHeartbeat(); return; }
+    if (via === 's') remoteLastShareBuy = now;
     remoteBuying = true; remoteHeartbeat();
     try {
       const st = document.createElement('div');
       // progress to the phone about once a second
       let lastSent = '';
-      const prog = setInterval(() => { const t = st.textContent; if (t && t !== lastSent) { lastSent = t; remoteSend({ t: 'res', re: m.cid ?? id, cmd: 'buy', ok: true, text: t, at: Date.now(), partial: true }); } }, 1000);
+      const prog = setInterval(() => { const t = st.textContent; if (t && t !== lastSent) { lastSent = t; reply(t, true, { partial: true }); } }, 1000);
       try { await runShopBuy(c.items, st); } finally { clearInterval(prog); }
       reply(lastBuyResult?.text || 'Done.');
-      if (settings.remoteAlerts !== false && m.cid && String(m.cid).startsWith('app-')) relay.notify(settings.remoteCode, { title: '🛒 Bought on PC', message: lastBuyResult?.text?.slice(0, 300) || 'Done.', priority: 2, tags: ['shopping_cart'] });
+      remoteLast();
+      if (app && settings.remoteAlerts !== false && remoteKeys?.ntfyAlerts) relay.notify(remoteKeys.ntfyAlerts, { title: '🛒 Bought on PC', message: lastBuyResult?.text?.slice(0, 300) || 'Done.', priority: 2, tags: ['shopping_cart'] });
     } finally { remoteBuying = false; try { render(); } catch {} }
     remoteHeartbeat();
     setTimeout(remoteHeartbeat, 2500); // once the game's state shows the purchases
   }
 }
-function remoteRestart() {
+let remoteGen = 0;
+async function remoteRestart() {
+  const gen = ++remoteGen;
   try { remoteSession?.close(); } catch {}
   try { remoteNtfyStop?.(); } catch {}
-  remoteSession = null; remoteNtfyStop = null;
+  remoteSession = null; remoteNtfyStop = null; remoteKeys = null;
   if (!settings.featRemote || !relay.valid(settings.remoteCode)) return;
+  let k = null; try { k = await relay.keys(settings.remoteCode); } catch (e) { console.error('[mglh remote]', e); }
+  if (!k || gen !== remoteGen) return;
+  remoteKeys = k;
   remoteSession = relay.connect(settings.remoteCode, {
-    onMsg: (m) => remoteOnMessage(m),
-    onState: (n) => { if (n) remoteHeartbeat(); }, // (re)connected: put the status back on the broker
+    onMsg: (m, o) => remoteOnMessage(m, o),
+    onState: (n) => { if (n) { remoteHeartbeat(); remoteLast(); } }, // (re)connected: put the status back on the broker
     will: { t: 'hb', v: MOD_VERSION, ok: false, off: true, why: 'the game tab on the PC closed, or the PC lost its internet', at: Date.now() },
   });
-  // the ntfy app's notification buttons ("Buy on PC", "Stop")
-  if (settings.remoteAlerts !== false) remoteNtfyStop = relay.ntfyListen(settings.remoteCode, (m) => remoteOnMessage(m), '30s');
+  // the ntfy app's notification buttons ("Buy on PC", "Stop"): owner key only
+  if (settings.remoteAlerts !== false) remoteNtfyStop = relay.ntfyListen(k.ntfyCmd, async (text) => { const r = await relay.unseal(k, text); if (r?.via === 'o') remoteOnMessage(r.m, { via: 'o', app: true }); }, '30s');
+  try { render(); } catch {}
 }
-// Repeating alerts (🔁) also go to the ntfy phone app, once per item and restock, with "Buy on PC" and "Stop" buttons
-onRareRing = (items, first) => {
-  if (!settings.featRemote || settings.remoteAlerts === false || !relay.valid(settings.remoteCode)) return;
-  const cmd = (t) => RELAY_PREFIX + JSON.stringify({ t, cid: 'app-' + t + '-' + Date.now() });
+// Repeating alerts (🔁) also go to the ntfy phone app, once per item and restock, with "Buy on PC" and "Stop" buttons.
+// Each button carries a command encrypted with the owner key that runs once and expires after 30 minutes.
+onRareRing = async (items, first) => {
+  const k = remoteKeys;
+  if (!settings.featRemote || settings.remoteAlerts === false || !k) return;
+  const cmd = (t) => relay.seal(k, 'o', { t, cid: 'app-' + t + '-' + Date.now(), mid: relay.hex(relay.crypto().getRandomValues(new Uint8Array(8))), ts: Date.now(), exp: Date.now() + REMOTE_APP_MAX_AGE });
   const actions = [
-    ...(settings.featBuyAll === false ? [] : [{ action: 'http', label: 'Buy on PC', url: `${RELAY}/${settings.remoteCode}`, method: 'POST', body: cmd('buy'), clear: true }]),
-    { action: 'http', label: 'Stop', url: `${RELAY}/${settings.remoteCode}`, method: 'POST', body: cmd('stop'), clear: true },
+    ...(settings.featBuyAll === false ? [] : [{ action: 'http', label: 'Buy on PC', url: `${RELAY}/${k.ntfyCmd}`, method: 'POST', body: await cmd('buy'), clear: true }]),
+    { action: 'http', label: 'Stop', url: `${RELAY}/${k.ntfyCmd}`, method: 'POST', body: await cmd('stop'), clear: true },
   ];
-  relay.notify(settings.remoteCode, { title: first ? '🔁 In stock' : '🔁 Still in stock', message: items.map((i) => `${pretty(i.name)} ×${i.left}`).join(', '), priority: 4, tags: ['bell'], actions });
+  relay.notify(k.ntfyAlerts, { title: first ? '🔁 In stock' : '🔁 Still in stock', message: items.map((i) => `${pretty(i.name)} ×${i.left}`).join(', '), priority: 4, tags: ['bell'], actions });
 };
-// Status: on each restock or change in what's to buy (checked every 5 s, at most every 5 s), and every 60 s
+// Status: on each restock or change in what's to buy (checked every 5 s, at most every 5 s). With something to buy it's
+// also refreshed every 60 s; with nothing to buy nothing changes until the next restock (the seed shop restocks every
+// 5 minutes), so it waits for that (or at most 6 minutes). A closed tab is still reported at once by the brokers.
 setInterval(() => {
   if (!settings.featRemote || !remoteSession || shopBusy || remoteBuying) return;
-  if ((remoteSig() !== remoteLastSig && Date.now() - remoteLastHb > 5000) || Date.now() - remoteLastHb > 60000) remoteHeartbeat();
+  let units = 0; try { units = collectShopBuy().units; } catch {}
+  const quiet = Date.now() - remoteLastHb;
+  if ((remoteSig() !== remoteLastSig && quiet > 5000) || quiet > (units ? 60000 : 360000)) remoteHeartbeat();
 }, 5000);
 setTimeout(remoteRestart, 3000);
 

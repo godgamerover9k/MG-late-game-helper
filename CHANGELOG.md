@@ -1,5 +1,18 @@
 # MG Lategame Helper: changelog
 
+## 0.18.0
+- 📱 Phone remote, security:
+  - The PC only acts on four commands: Buy (the same as pressing Buy everything on the PC), Reconnect (only while the game on the PC is disconnected), Stop (repeating alerts) and a status refresh. None of them takes any input. Anything else is ignored, and nothing a phone sends reaches the game. The phone only gets whether the game is connected, what's to buy (names, amounts, pictures), the time to the next restock and the results of its own commands.
+  - Messages are encrypted and signed (AES-GCM) with keys made from the pairing code. The topic on the relay servers is a hash of the code. Anyone listening on the public brokers sees neither the code nor what's in the messages, and can't send commands the PC accepts. A command only runs once (sending the same message again does nothing, including after the page reloads) and only if it is at most 5 minutes old. The phone page says so if the phone's clock is too far off.
+  - The ntfy app's "Buy on PC" / "Stop" buttons carry a command encrypted the same way. It runs once and expires after 30 minutes. The ntfy topics are also made from the code: subscribe again in the app to the topic shown under Settings → 📱 Phone remote (the old "<code>-a" topic is no longer used).
+  - Not compatible with the earlier phone page: update the mod on the PC and remote.html together. Pairing codes and saved phone links stay the same.
+- 📱 Buy-only links (off by default): "Let people with my Buy-only link press Buy on this PC" and "Copy Buy-only link". The link holds a share code made from the pairing code by a one-way hash, so the pairing code can't be worked out from it. With it, a phone can only press Buy and see what's to buy, and only while sharing is on. It can't use Reconnect or Stop, and it doesn't see the last buy's result (only the results of its own presses). While sharing is off, it can't read anything. "New code" makes the link stop working. Buy from a shared link at most once every 10 s.
+- 📱 Optional name for the PC shown on phones (Settings → 📱 Phone remote).
+- Phone page: several PCs at once, one card each (name, yours / Buy-only, status, Buy, Reconnect for your own, ✕ to remove), and "Buy on all" when there are two or more. "Add or share codes" takes any text with one or more codes or links. "Share Buy-only link" makes one link with the share codes of all PCs on the page (your own pairing codes are never in it). "Copy full link" makes one with the full codes, for your own other devices. A link with several codes adds them all. A code saved by an earlier version is kept.
+
+## 0.17.3
+- 📱 Phone remote: with nothing to buy, the PC doesn't refresh its status every minute; nothing changes until the next restock (the seed shop restocks every 5 minutes), so it sends the next status then (at most 6 minutes later). With something to buy it still refreshes every 60 s. The phone page waits accordingly before saying "No word from your PC"; a closed game tab is still shown as offline straight away.
+
 ## 0.17.2
 - The game's page store (used for your player id, the world map and your position, e.g. for the riding hint) is read through window.__jotaiStore, which the game provides from release 1604 (developers' note). Nothing in the game is patched then; any temporary patch from before the store appeared is undone. On older releases the earlier method (a short-lived patch of atom writes, never of reads) is kept as a fallback.
 

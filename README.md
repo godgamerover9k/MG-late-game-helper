@@ -23,7 +23,22 @@ Press **Buy everything** on your PC from your phone, without installing anything
 
 The page shows whether your PC's game is connected, what's in stock to buy and when the next restock is, with a **Buy on PC** button (the same list and checks as pressing Buy on the PC) and **Reconnect PC** (reloads the game on the PC after it was disconnected; only when you press it). The phone never joins the game, so nothing gets disconnected. The PC must be on with the game open.
 
-The page is [remote.html](remote.html) in this repository, served by GitHub Pages. It talks to your PC through public MQTT message brokers ([HiveMQ](https://www.hivemq.com/mqtt/public-mqtt-broker/) and [EMQX](https://www.emqx.com/en/mqtt/public-mqtt5-broker), both at once) on a secret pairing code (the part after # in the link, which stays on your phone): no account and no daily limit. Keep the link to yourself; **New code** makes old links stop working. Repeating item alerts can also go to the [ntfy](https://ntfy.sh) phone app, with "Buy on PC" and "Stop" buttons.
+The page is [remote.html](remote.html) in this repository, served by GitHub Pages. It talks to your PC through public MQTT message brokers ([HiveMQ](https://www.hivemq.com/mqtt/public-mqtt-broker/) and [EMQX](https://www.emqx.com/en/mqtt/public-mqtt5-broker), both at once): no account and no daily limit. The pairing code is the part after # in the link; it stays on your phone and PC. Keep the link to yourself; **New code** makes old links stop working. Repeating item alerts can also go to the [ntfy](https://ntfy.sh) phone app, with "Buy on PC" and "Stop" buttons.
+
+**What the remote can do:**
+- The PC takes only four commands from a phone: **Buy** (the same as pressing Buy everything on the PC, with all its rules: no selling, no credits, no Magic Dust except the potions you allowed), **Reconnect** (only while the game on the PC is disconnected), **Stop** (repeating alerts) and a status refresh.
+- None of these commands take any input. Anything else is ignored, and nothing a phone sends reaches the game.
+- The phone only sees whether the game is connected, what's to buy and when the next restock is.
+
+**Security:**
+- Messages are encrypted and signed with keys made from the pairing code, on a relay topic that is a hash of it.
+- Others on the public brokers can't read them or send commands the PC accepts.
+- Each command runs once, and only while it is at most 5 minutes old.
+
+**Several PCs, Buy-only links:** the page can hold several PCs (one card each, plus **Buy on all**) and add or share several codes at once.
+- On a PC, **Let people with my Buy-only link press Buy on this PC** (off by default) and **Copy Buy-only link** give a link that can only press Buy and see what's to buy.
+- That link can't be turned back into the pairing code.
+- Switching sharing off stops it; **New code** cancels it.
 
 ## Features
 
@@ -40,7 +55,7 @@ The page is [remote.html](remote.html) in this repository, served by GitHub Page
 - **Mounts:** while riding a Thundercharger or Capture pet, shows how many crops it would charge or capsules it would make where you stand.
 - **Buy everything:** buys every shop's stock in one press per restock and puts purchases away in the Seed Silo, Tool Shack and Decor Shed. You can switch off individual items. Buildings, one-time items and Magic Dust items are never bought (XP and Hunger potions optional).
 - **Item alerts:** for every item, no alert, once per restock, or repeating until bought (repeating ones also reach your phone).
-- **📱 Phone page:** press Buy or Reconnect on your PC from your phone.
+- **📱 Phone page:** press Buy or Reconnect on your PC from your phone; several PCs on one page; Buy-only links for others.
 - **Other:**
   - joins a public room with 5 players in one press;
   - pity alert (with QPM);
