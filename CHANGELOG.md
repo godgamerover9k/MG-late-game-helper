@@ -1,5 +1,26 @@
 # MG Lategame Helper: changelog
 
+## 0.18.3
+- 📱 Several people can press Buy on the same PC at once (your phones, people with the Buy-only link, the ntfy app button, the PC itself). There is still only ever one buy at a time, and nothing is bought twice.
+  - A press while a buy is running joins it ("Already buying: progress follows") and gets the same progress and result, instead of an error.
+  - A phone press while a buy started on the PC is running gets that buy's result when it ends.
+  - A press in the few seconds right after a buy (while the game's stock updates) gets that buy's result. A later press with nothing left says "Nothing left to buy: bought N s ago".
+  - The 10-second wait between Buy presses from Buy-only links is gone; joining covers it.
+
+## 0.18.2
+- Phone page: one card per PC, never two.
+  - Each PC now sends a random id of its own (not tied to the game account or the computer), the same under every code.
+  - When two codes on the page belong to the same PC (an old code from before "New code" and the new one, or someone's Buy-only link and your own code), the page keeps one: the live code, your own over a Buy-only one, the newest status. It removes the other from the phone and says so.
+  - Adding a code that's already there, or the Buy-only code of a PC whose pairing code is there, adds nothing ("already here").
+- 📱 "New code" on the PC first marks the old code as replaced. Phones still on it show "Old code: it was replaced by a new one on this PC" instead of "PC offline", and drop it once the new link is added.
+- Settings lists typed as text (ignored species and the like) drop repeated entries.
+
+## 0.18.1
+- 🛒 "Choose what Buy everything buys…" (Settings → 🛒 Shop, and "🛒 Choose items…" on the Shop tab): a menu with every item of every shop, in stock or not. Each item has a switch: 🛒 bought or ⏸ switched off. It shows pictures, rarity in the game's colours, what's in stock now and the price.
+  - The menu has search, a filter (all / bought / switched off / never bought / in stock now), "all" buttons per shop (they apply to the items matching the search) and "Switch all back on".
+  - Buildings, one-time items and Magic Dust items are listed with the reason and can't be switched on (XP and Hunger potions follow "Also buy XP and Hunger potions").
+  - The choices are the same as clicking items in the Buy window and apply to Buy everything on the PC and from the 📱 phone page.
+
 ## 0.18.0
 - 📱 Phone remote, security:
   - The PC only acts on four commands: Buy (the same as pressing Buy everything on the PC), Reconnect (only while the game on the PC is disconnected), Stop (repeating alerts) and a status refresh. None of them takes any input. Anything else is ignored, and nothing a phone sends reaches the game. The phone only gets whether the game is connected, what's to buy (names, amounts, pictures), the time to the next restock and the results of its own commands.

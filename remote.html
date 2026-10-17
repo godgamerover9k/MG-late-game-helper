@@ -42,7 +42,8 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.0</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.3</small></h1>
+  <div id="note" class="muted"></div>
   <section class="card" id="all" hidden>
     <div id="allstate" class="state"></div>
     <button id="buyall" class="go" disabled>Buy on all</button>
@@ -335,7 +336,7 @@ const relay = {
   let codes = []; try { codes = JSON.parse(store.get('mglhRemoteCodes', '[]')); } catch {}
   if (!Array.isArray(codes)) codes = [];
   { const old = store.get('mglhRemoteCode', ''); if (relay.valid(old) && !codes.includes(old)) codes.push(old); }
-  codes = codes.filter(relay.validAny);
+  codes = [...new Set(codes.filter(relay.validAny))];
   const saveCodes = () => store.set('mglhRemoteCodes', JSON.stringify(codes));
   // A link (…#mglh-CODE, …#mglhs-A,mglhs-B) adds its codes, then the # part is removed from the address bar
   { const found = relay.findCodes(location.hash); if (found.length) { found.forEach((c) => { if (!codes.includes(c)) codes.push(c); }); try { history.replaceState(null, '', location.pathname + location.search); } catch {} } }
@@ -371,6 +372,7 @@ const relay = {
     e.el.name.textContent = hb?.name || `PC ${e.index + 1}`;
     e.el.state.innerHTML = !linked() && Date.now() - linkSince > 8000 ? '<span class="bad">Can\'t reach the relay servers.</span> <span class="muted">Check this phone\'s internet; it keeps retrying.</span>'
       : !hb ? (linked() ? `Waiting for this PC… <span class="muted">${e.own ? '(game open on it, with Settings → 📱 Phone remote on, mod 0.18.0 or newer?)' : '(game open on it, with "Let people with my Buy-only link press Buy" on?)'}</span>` : 'Connecting…')
+      : hb.replaced ? `<span class="bad">Old code</span>: it was replaced by a new one on this PC (New code). <span class="muted">Open the new link from the PC, then remove this one (✕).</span>`
       : hb.off ? `<span class="bad">PC offline</span>: ${esc(hb.why || 'the game tab closed')}.`
       : !fresh ? `<span class="bad">No word from this PC</span> since ${ago(hb.base)}. <span class="muted">It may be off, asleep, or the game tab closed.</span>`
       : hb.ok ? `<span class="ok">PC connected</span> · ${hb.busy ? 'buying…' : num(hb.units) ? `<b>${num(hb.units)}</b> to buy` : 'nothing to buy'}${left != null ? (left > 0 ? ` · next restock in ${mmss(left)}` : ' · restocking…') : ''}${!e.own && hb.share === false ? ' · <span class="bad">not taking Buy from shared links</span>' : ''}`
@@ -404,6 +406,7 @@ const relay = {
     if (part === '/s' && m.t === 'hb') {
       // a status kept on the server is as old as the PC says; a live one is from now (so a PC clock that's off doesn't matter)
       e.hb = { ...m, base: retained ? Math.min(Date.now(), num(m.at)) : Date.now(), recv: Date.now() };
+      if (dedupe()) return;
     } else if (part === '/r' && m.t === 'last' && via === 'o' && m.res) {
       e.last = { at: num(m.res.at), text: String(m.res.text ?? '').slice(0, 900) };
     } else if (part === '/m' && m.t === 'res' && e.pending && m.re === e.pending) {
@@ -415,6 +418,30 @@ const relay = {
       }
     } else return;
     drawOne(e); draw();
+  };
+  // The same PC under two codes (an old one from before "New code", or its pairing code and someone's Buy-only link):
+  // each PC sends a random id of its own, so keep one card per PC: the live code, your own code over a Buy-only one,
+  // the newest status. The others are removed from this phone.
+  const dedupe = () => {
+    const byPc = new Map();
+    for (const e of pcs) { const id = e.hb?.pc; if (typeof id === 'string' && /^[0-9a-f]{12}$/.test(id)) byPc.set(id, [...(byPc.get(id) ?? []), e]); }
+    const drop = [];
+    for (const group of byPc.values()) {
+      if (group.length < 2) continue;
+      const score = (e) => [e.hb.replaced ? 0 : 1, e.hb.off ? 0 : 1, e.own ? 1 : 0, num(e.hb.at)];
+      group.sort((a, b) => { const x = score(a), y = score(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return y[i] - x[i]; return 0; });
+      drop.push(...group.slice(1));
+    }
+    if (!drop.length) return false;
+    const gone = new Set(drop);
+    codes = codes.filter((c) => !drop.some((e) => e.code === c));
+    saveCodes();
+    pcs = pcs.filter((e) => !gone.has(e));
+    drop.forEach((e) => { clearTimeout(e.timer); e.el.root.remove(); });
+    pcs.forEach((e, i) => { e.index = i; });
+    $('note').textContent = `Removed ${drop.length === 1 ? 'a second code' : `${drop.length} extra codes`} for the same PC (${drop.map((e) => e.hb.name || 'unnamed').join(', ')}).`;
+    draw();
+    return true;
   };
   const command = (e, t) => {
     const cid = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -432,6 +459,7 @@ const relay = {
     const shareOf = new Map(await Promise.all(codes.map(async (c) => [c, relay.valid(c) ? await relay.shareOf(c) : c])));
     const shares = new Set(codes.filter(relay.valid).map((c) => shareOf.get(c)));
     const list = codes.filter((c) => !(relay.validShare(c) && shares.has(c)));
+    if (list.length !== codes.length) { codes = list; saveCodes(); }
     pcs = list.map((code) => ({ code, share: shareOf.get(code), own: relay.valid(code), hb: null, last: null, pending: null, pendingCmd: null, timer: null, doneAt: 0, askedAt: 0, mine: false, lastItems: null }));
     build(); draw();
     if (!pcs.length) return;
@@ -439,10 +467,14 @@ const relay = {
     session = relay.connect(list, { onMsg, onState: (n) => { if (n && !asked) { asked = true; setTimeout(() => pcs.forEach((e) => send(e, { t: 'ping' })), 300); } draw(); } });
   };
   $('buyall').onclick = () => { const ready = pcs.filter(canBuy); const sent = ready.filter((e) => command(e, 'buy')).length; $('allres').textContent = `Sent Buy to ${sent} PC${sent === 1 ? '' : 's'}.`; };
-  $('add').onclick = () => {
+  $('add').onclick = async () => {
     const found = relay.findCodes($('codes').value);
     if (!found.length) { $('pairres').innerHTML = '<span class="bad">No codes in there (they start with mglh- or mglhs-).</span>'; return; }
-    const added = found.filter((c) => !codes.includes(c)); codes.push(...added); saveCodes();
+    // already here: the same code, or the Buy-only code of a PC whose pairing code is here
+    const here = new Set(codes);
+    for (const c of [...codes, ...found]) if (relay.valid(c)) here.add(await relay.shareOf(c));
+    const added = found.filter((c) => !codes.includes(c) && !(relay.validShare(c) && here.has(c)));
+    codes.push(...added); saveCodes();
     $('codes').value = ''; $('pairres').textContent = `Added ${added.length} code${added.length === 1 ? '' : 's'}${found.length > added.length ? ` (${found.length - added.length} already here)` : ''}.`;
     connect();
   };

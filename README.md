@@ -39,6 +39,7 @@ The page is [remote.html](remote.html) in this repository, served by GitHub Page
 - On a PC, **Let people with my Buy-only link press Buy on this PC** (off by default) and **Copy Buy-only link** give a link that can only press Buy and see what's to buy.
 - That link can't be turned back into the pairing code.
 - Switching sharing off stops it; **New code** cancels it.
+- Several people can press Buy at once: there's only one buy at a time, and later presses get its result.
 
 ## Features
 
@@ -53,7 +54,7 @@ The page is [remote.html](remote.html) in this repository, served by GitHub Page
   - asks before harvesting a Gold/Rainbow celestial crop without Double Harvest pets out.
 - **Journal:** pet and crop logging, crop filters by mutation, the missing variants shown above the plant you stand on, and seeds taken from the Seed Silo in one press.
 - **Mounts:** while riding a Thundercharger or Capture pet, shows how many crops it would charge or capsules it would make where you stand.
-- **Buy everything:** buys every shop's stock in one press per restock and puts purchases away in the Seed Silo, Tool Shack and Decor Shed. You can switch off individual items. Buildings, one-time items and Magic Dust items are never bought (XP and Hunger potions optional).
+- **Buy everything:** buys every shop's stock in one press per restock and puts purchases away in the Seed Silo, Tool Shack and Decor Shed. A menu lets you choose, for every item in the game, whether it's bought. Buildings, one-time items and Magic Dust items are never bought (XP and Hunger potions optional).
 - **Item alerts:** for every item, no alert, once per restock, or repeating until bought (repeating ones also reach your phone).
 - **📱 Phone page:** press Buy or Reconnect on your PC from your phone; several PCs on one page; Buy-only links for others.
 - **Other:**

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.18.0
+// @version      0.18.3
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.18.0';
+const MOD_VERSION = '0.18.3';
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote).
@@ -1290,6 +1290,7 @@ const DEFAULT_SETTINGS = {
   remoteAlerts: true, // rare alerts and Buy results also go to the ntfy phone app (on a topic made from the code)
   remoteShare: false, // people with the Buy-only link (share code) may press Buy on this PC
   remoteName: null, // name shown on phones for this PC (optional)
+  remotePcId: null, // a random id for this PC, kept across new codes, so a phone can tell two codes of the same PC apart
   featRareAlert: true, // 🔔 alert when a rare item is in a shop
   rareAlertMin: 'Divine', // lowest rarity that alerts: Mythic / Divine / Celestial
   rareAlertSound: true, // chime with the alert
@@ -2980,6 +2981,7 @@ function renderSettings(bar, body) {
     <details data-sec="shop"${secOpen('shop')}><summary><b>🛒 Shop</b></summary>
       ${chk('buyPotions', 'Also buy XP and Hunger potions (Magic Dust)')}
       ${chk('featRareAlert', '🔔 Alert when a rare item is in stock')}
+      <div><button data-a="buymenu">🛒 Choose what Buy everything buys…</button> <span class="muted">${esc(buySummary())}</span></div>
       <div><button data-a="alertmenu">🔔 Choose alerts for each item…</button> <span class="muted">${esc(alertSummary())}</span></div>
       ${sel('rareAlertMin', 'Items you haven\'t set: alert once if at least', [['Mythic', 'Mythic'], ['Divine', 'Divine'], ['Celestial', 'Celestial'], ['none', 'never (only items you set)']])}
       ${sel('rareAlertEvery', '🔁 Repeating alerts ring every', [['10', '10 s'], ['15', '15 s'], ['30', '30 s'], ['60', '1 min']])} <span class="muted">until bought or stopped; only these go to your phone (📱 Phone remote)</span>
@@ -3024,7 +3026,7 @@ function onChange(e) {
     if (k === 'remoteShare' || k === 'remoteName') setTimeout(() => remoteHeartbeat(), 0);
     if (k === 'rareAlertDesktop' && t.checked) { try { if (W.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch {} }
   } else if (t.dataset.list) {
-    settings[t.dataset.list] = t.value.split(',').map((s) => s.trim()).filter(Boolean);
+    settings[t.dataset.list] = [...new Set(t.value.split(',').map((s) => s.trim()).filter(Boolean))];
   } else if (t.dataset.ign) {
     const set = new Set(settings.ignored ?? DEFAULT_IGNORED_LIST);
     t.checked ? set.add(t.dataset.ign) : set.delete(t.dataset.ign);
@@ -3088,10 +3090,11 @@ function onClick(e) {
   if (a === 'fabreset') { store.set('fabPos', null); setFabPos(fabPos(), false); avoidOtherButtons(); render(); return; }
   if (a === 'tabreset') { settings.tabOrder = []; saveSettings(); render(); return; }
   if (a === 'chimetest') { chime(); return; }
-  if (a === 'remotenew') { settings.remoteCode = relay.newCode(); saveSettings(); remoteRestart(); render(); return; }
+  if (a === 'remotenew') { remoteRetire(); settings.remoteCode = relay.newCode(); saveSettings(); setTimeout(() => { remoteRestart(); render(); }, 1500); render(); return; }
   if (a === 'remotesharecopy') { const link = remoteShareLink(); if (!link) return; try { navigator.clipboard.writeText(link); toast('Buy-only link copied: whoever opens it can press Buy on this PC while sharing is on, and see what\'s to buy here.', { key: 'remote', ms: 7000 }); } catch { prompt('Buy-only link:', link); } return; }
   if (a === 'remotecopy') { const link = remotePageLink(); try { navigator.clipboard.writeText(link); toast('Phone link copied: open it on your phone (send it to yourself, or type it in).', { key: 'remote', ms: 6000 }); } catch { prompt('Phone link:', link); } return; }
   if (a === 'alertmenu') { openAlertMenu(); return; }
+  if (a === 'buymenu') { openBuyMenu(); return; }
   if (a === 'reset') { settings = { ...DEFAULT_SETTINGS, pinned: settings.pinned, gardenOwner: settings.gardenOwner }; saveSettings(); analyze(); render(); }
   if (a === 'copy') copyReport(b);
   if (a === 'refreshdata') { b.textContent = 'Refreshing…'; loadLiveData(true); }
@@ -3181,6 +3184,7 @@ function renderShop(bar, body) {
   const block = !ready.ok ? ready.reason : !inStock.length ? 'Nothing left in any shop.' : '';
   const dur = (sec) => sec >= 3600 ? `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m` : sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
   bar.innerHTML = `<span class="grow"><b>${inStock.length}</b> items in stock across ${shops.length} shops, weather shops included (${units} units). Buildings, one-time purchases and anything costing Magic Dust are skipped. Bought items go into your Seed Silo / Tool Shack / Decor Shed when you have one.</span>
+    <button data-a="buymenu" title="Choose, for every item in the game, whether Buy everything buys it">🛒 Choose items…</button>
     <button data-a="shopbuy" ${block || shopBusy ? 'disabled' : ''} title="${esc(block)}">🛒 Buy everything…</button>`;
   body.innerHTML = `<div class="teams">${shops.map((sh) => `<div class="team"><div class="thd"><b>${esc(shopLabel(sh.key))}</b><span class="tval">${sh.closed ? '<span class="muted">closed</span>' : `${sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).length} to buy`}</span>${sh.restockIn ? `<span class="muted">restocks in ${dur(sh.restockIn)}</span>` : ''}</div>
     <div class="shopitems">${shopCatalog(sh).map((i) => `<span class="tag${i.left && !shopSkip(i) && !isBuyOff(sh.key, i.id) ? '' : ' have'}${shopSkip(i) ? '' : ' buytog'}"${shopSkip(i) ? '' : ` data-buyoff="${esc(buyOffKey(sh.key, i.id))}"`} title="${shopSkip(i) ? 'Never bought by Buy everything' : `${i.absent ? 'Not in stock now' : `${i.left} of ${i.stock} left`} · click to switch ${isBuyOff(sh.key, i.id) ? 'it back on' : 'it off'} for Buy everything`}">${shopImg(i, 18)} ${esc(pretty(i.name))} ${i.absent ? '' : `<b>×${i.left}</b>`}${shopSkip(i) ? ' · ' + SKIP_LABEL[shopSkip(i)] : isBuyOff(sh.key, i.id) ? ' · ⏸ switched off' : i.absent ? ' · not in stock now' : i.price ? ` · ${i.price.toLocaleString()}🪙` : ''}${settings.featRareAlert === false ? '' : ` ${alertBell(i)}`}</span>`).join('') || `<span class="muted">${sh.closed ? (sh.key === 'spooky' ? 'Closed: the Spooky shop is only open at night (30 minutes every 10 hours)' : 'Closed right now: nothing for sale') : 'Empty'}</span>`}</div></div>`).join('')}</div>`;
@@ -3707,6 +3711,61 @@ function openAlertMenu() {
     if (b.dataset.m === 'close') { m.remove(); render(); }
   });
   m.addEventListener('keydown', (e) => { if (e.key === 'Escape') { m.remove(); render(); } });
+  draw();
+  q.focus();
+}
+// 🛒 Buy menu: every item of every shop, each with a switch: bought by Buy everything, or switched off. Items the mod never
+// buys (buildings, one-time items, Magic Dust items) are listed with the reason and can't be switched on.
+const BUY_LOCKED = new Set(['building', 'dust', 'one-time']);
+function buySummary() {
+  const n = (settings.buyOff ?? []).length;
+  return n ? `${n} item${n === 1 ? '' : 's'} switched off; everything else in stock is bought` : 'every item in stock is bought (except buildings, one-time and Magic Dust items)';
+}
+function openBuyMenu() {
+  const shops = game.readShops(settings.gardenOwner);
+  if (shops) rememberShopItems(shops);
+  const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">🛒 What Buy everything buys</b><span class="muted buysum">${esc(buySummary())}</span></div>
+    <div class="muted">🛒 bought · ⏸ switched off (never bought until you switch it back on). Applies to Buy everything here and on the 📱 phone page. 🏗️ buildings, 1️⃣ one-time items and ✨ Magic Dust items are never bought${settings.buyPotions ? ' (XP and Hunger potions are allowed in Settings)' : ' (XP and Hunger potions can be allowed in Settings → 🛒 Shop)'}.</div>
+    <div class="alrt-tools"><input type="search" class="alrt-q" placeholder="Search items…"><select class="alrt-f"><option value="all">All items</option><option value="on">Bought</option><option value="off">Switched off</option><option value="never">Never bought</option><option value="stock">In stock now</option></select></div>
+    <div class="alrt-list"></div>
+    <div class="acts"><button data-m="allon" title="Switch every item back on">Switch all back on</button><button data-m="close">Close</button></div>`);
+  m.classList.add('alertdlg');
+  const list = m.querySelector('.alrt-list'), q = m.querySelector('.alrt-q'), f = m.querySelector('.alrt-f');
+  const locked = (i) => BUY_LOCKED.has(shopSkip(i));
+  const match = (i, needle) => !needle || String(pretty(i.name)).toLowerCase().includes(needle) || String(i.id).toLowerCase().includes(needle);
+  const setOff = (keys, off) => { const cur = new Set(settings.buyOff ?? []); keys.forEach((k) => (off ? cur.add(k) : cur.delete(k))); settings.buyOff = [...cur]; saveSettings(); try { updateShopFab(); } catch {} };
+  const seg = (sh, i) => { const off = isBuyOff(sh.key, i.id), k = esc(buyOffKey(sh.key, i.id));
+    return locked(i) ? `<span class="muted" style="flex:0 0 auto">never</span>`
+      : `<span class="alrt-seg"><button data-bk="${k}" data-off="0" class="${off ? '' : 'on'}" title="Bought by Buy everything">🛒</button><button data-bk="${k}" data-off="1" class="${off ? 'on' : ''}" title="Switched off: never bought">⏸</button></span>`; };
+  const draw = () => {
+    m.querySelector('.buysum').textContent = buySummary();
+    const needle = q.value.trim().toLowerCase(), want = f.value;
+    if (!shops) { list.innerHTML = '<div class="muted">Couldn\'t read the shops yet: join your garden first.</div>'; return; }
+    list.innerHTML = shops.map((sh) => {
+      const items = shopCatalog(sh).filter((i) => match(i, needle) && (want === 'all' || (want === 'stock' && i.left > 0)
+        || (want === 'never' && locked(i)) || (want === 'off' && !locked(i) && isBuyOff(sh.key, i.id)) || (want === 'on' && !locked(i) && !isBuyOff(sh.key, i.id))));
+      if (!items.length) return '';
+      items.sort((x, y) => locked(x) - locked(y) || rarityRank(itemRarity(y)) - rarityRank(itemRarity(x)) || String(pretty(x.name)).localeCompare(String(pretty(y.name))));
+      return `<div class="alrt-shop"><div class="alrt-sh"><b>${esc(shopLabel(sh.key))}</b>${sh.closed ? ' <span class="muted">closed now</span>' : ''}<span class="alrt-bulk muted">all: <button class="mini" data-bulk="0" data-shop="${esc(sh.key)}" title="Buy every item listed here">🛒</button><button class="mini" data-bulk="1" data-shop="${esc(sh.key)}" title="Switch off every item listed here">⏸</button></span></div>
+        ${items.map((i) => `<div class="alrt-row"${locked(i) ? ' style="opacity:.55"' : ''}>${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${rarityTag(itemRarity(i))}${shopSkip(i) ? ` <span class="muted">· ${esc(SKIP_LABEL[shopSkip(i)] || 'never bought')}</span>` : ''}${i.left > 0 ? ` <b class="alrt-in">in stock ×${i.left}</b>` : ''}${!locked(i) && i.price ? ` <span class="muted">· ${Number(i.price).toLocaleString()}🪙</span>` : ''}</span>${seg(sh, i)}</div>`).join('')}</div>`;
+    }).join('') || '<div class="muted">No items match.</div>';
+  };
+  const close = () => { m.remove(); render(); };
+  m.addEventListener('input', (e) => { if (e.target === q) draw(); });
+  m.addEventListener('change', (e) => { if (e.target === f) draw(); });
+  m.addEventListener('click', (e) => {
+    if (e.target === m) { close(); return; }
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.bk) { setOff([b.dataset.bk], b.dataset.off === '1'); draw(); return; }
+    if (b.dataset.bulk) {
+      const sh = shops?.find((x) => x.key === b.dataset.shop); if (!sh) return;
+      const needle = q.value.trim().toLowerCase();
+      setOff(shopCatalog(sh).filter((i) => !locked(i) && match(i, needle)).map((i) => buyOffKey(sh.key, i.id)), b.dataset.bulk === '1'); draw(); return;
+    }
+    if (b.dataset.m === 'allon') { if (confirm('Switch every item back on for Buy everything?')) { settings.buyOff = []; saveSettings(); try { updateShopFab(); } catch {} draw(); } return; }
+    if (b.dataset.m === 'close') close();
+  });
+  m.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
   draw();
   q.focus();
 }
@@ -4515,7 +4574,7 @@ LOG(`v${MOD_VERSION} ready — press Alt+P or click 🐾 (bottom-left).`);
 // heard while "Let people with my Buy-only link press Buy" is on.
 // The status ("hb") is kept on the broker, so a phone sees it as soon as it opens the page; it's refreshed on each
 // restock or change in what's to buy, and after every command. If this tab closes, the broker marks the PC offline.
-let remoteSession = null, remoteKeys = null, remoteNtfyStop = null, remoteLastHb = 0, remoteLastSig = '', remoteBuying = false, remoteLastPing = 0, remoteLastShareBuy = 0;
+let remoteSession = null, remoteKeys = null, remoteNtfyStop = null, remoteLastHb = 0, remoteLastSig = '', remoteBuying = false, remoteLastPing = 0;
 const REMOTE_CMDS = { o: new Set(['buy', 'reconnect', 'ping', 'stop']), s: new Set(['buy', 'ping']) };
 const REMOTE_MAX_AGE = 5 * 60000, REMOTE_APP_MAX_AGE = 30 * 60000;
 // The phone page lives in the mod's GitHub repo (GitHub Pages); the code goes after the #, which never leaves the phone
@@ -4545,13 +4604,27 @@ function remoteStatus() {
   // [name, amount, picture]; pictures from the sprite server are sent without its address (the page adds it back)
   const SPR = 'https://mg-api.ariedam.fr/assets/sprites/';
   const items = (c?.items ?? []).slice(0, 36).map((i) => { const u = shopImgUrl(i); return [String(pretty(i.name)).slice(0, 28), i.left, u.startsWith(SPR) ? u.slice(SPR.length, SPR.length + 60) : '']; });
-  const hb = { t: 'hb', v: MOD_VERSION, name: String(settings.remoteName || '').slice(0, 24), ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
+  const hb = { t: 'hb', v: MOD_VERSION, pc: remotePcId(), name: String(settings.remoteName || '').slice(0, 24), ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
     units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying, share: !!settings.remoteShare, at: Date.now() };
   // keep the status small (well under the brokers' limits): pictures go first, then the end of the list
   const size = () => new TextEncoder().encode(JSON.stringify(hb)).length * 1.4;
   if (size() > 3800) hb.items = hb.items.map(([n, q]) => [n, q, '']);
   while (size() > 3800 && hb.items.length > 5) hb.items.pop();
   return hb;
+}
+// a random id for this PC (not tied to the game or the computer), the same under every code
+function remotePcId() {
+  if (!/^[0-9a-f]{12}$/.test(settings.remotePcId || '')) { settings.remotePcId = relay.hex(relay.crypto().getRandomValues(new Uint8Array(6))); saveSettings(); }
+  return settings.remotePcId;
+}
+// "New code": the old code's status says it was replaced (phones then drop it, or show that), then the connection closes
+function remoteRetire() {
+  const s = remoteSession;
+  if (!s) return;
+  remoteGen++; remoteSession = null;
+  try { remoteNtfyStop?.(); } catch {} remoteNtfyStop = null;
+  s.send({ t: 'hb', v: MOD_VERSION, pc: remotePcId(), name: String(settings.remoteName || '').slice(0, 24), ok: false, off: true, replaced: true, why: 'this code was replaced by a new one on the PC', at: Date.now() }, { retain: true, via: 's' });
+  setTimeout(() => { try { s.close(); } catch {} }, 1200);
 }
 const remoteSig = () => { try { const c = collectShopBuy(); return c.restocks + '|' + c.units + '|' + net.readiness().ok; } catch { return ''; } };
 // The status is made with the share key while sharing is on (so Buy-only phones can read it), otherwise with the owner
@@ -4585,27 +4658,56 @@ async function remoteOnMessage(m, { via, part = '/m', app = false } = {}) {
   }
   if (m.t === 'buy') {
     if (settings.featBuyAll === false) { reply('Buy everything is switched off on the PC.', false); return; }
+    // Several people can press Buy at once (your phones, people with the Buy-only link, the PC itself): there is only
+    // ever one buy at a time. Presses while one runs join it: they get its progress and its result, nothing is bought twice.
+    if (remoteBuying || shopBusy) {
+      remoteWatchers.push({ cid, via });
+      reply(remoteBuying ? 'Already buying (pressed on another phone): progress follows.' : 'Already buying (started on the PC): the result follows.', true, { partial: true });
+      if (!remoteBuying) remoteWaitLocal();
+      return;
+    }
+    // right after a buy the game's stock takes a moment to update: a press then gets that buy's result
+    if (remoteLastDone && now - remoteLastDone.at < 4000) { reply(`Already bought a moment ago: ${remoteLastDone.text}`); return; }
     const ready = net.readiness();
     if (!ready.ok) { reply(`The PC can't buy right now: ${ready.reason || 'not connected'}.`, false); return; }
-    if (shopBusy || remoteBuying) { reply('The PC is already buying.', false); return; }
-    if (via === 's' && now - remoteLastShareBuy < 10000) { reply('Just bought; try again in a few seconds.', false); return; }
     const c = collectShopBuy();
-    if (!c.items.length) { reply('Nothing to buy right now.', false); remoteHeartbeat(); return; }
-    if (via === 's') remoteLastShareBuy = now;
-    remoteBuying = true; remoteHeartbeat();
+    if (!c.items.length) { reply(remoteLastDone && now - remoteLastDone.at < 60000 ? `Nothing left to buy: bought ${Math.round((now - remoteLastDone.at) / 1000)} s ago.` : 'Nothing to buy right now.', !!remoteLastDone); remoteHeartbeat(); return; }
+    remoteBuying = true; remoteWatchers = [{ cid, via }]; remoteHeartbeat();
     try {
       const st = document.createElement('div');
-      // progress to the phone about once a second
+      // progress to every phone waiting on this buy, about once a second
       let lastSent = '';
-      const prog = setInterval(() => { const t = st.textContent; if (t && t !== lastSent) { lastSent = t; reply(t, true, { partial: true }); } }, 1000);
+      const prog = setInterval(() => { const t = st.textContent; if (t && t !== lastSent) { lastSent = t; remoteTell(t, true, { partial: true }); } }, 1000);
       try { await runShopBuy(c.items, st); } finally { clearInterval(prog); }
-      reply(lastBuyResult?.text || 'Done.');
-      remoteLast();
+      remoteFinish();
       if (app && settings.remoteAlerts !== false && remoteKeys?.ntfyAlerts) relay.notify(remoteKeys.ntfyAlerts, { title: '🛒 Bought on PC', message: lastBuyResult?.text?.slice(0, 300) || 'Done.', priority: 2, tags: ['shopping_cart'] });
-    } finally { remoteBuying = false; try { render(); } catch {} }
+    } finally { remoteBuying = false; remoteWatchers = []; try { render(); } catch {} }
     remoteHeartbeat();
     setTimeout(remoteHeartbeat, 2500); // once the game's state shows the purchases
   }
+}
+// phones waiting on the buy that's running: each gets the progress and the result under its own command
+let remoteWatchers = [], remoteLastDone = null, remoteLocalWait = null;
+const remoteTell = (text, ok, extra = {}) => remoteWatchers.forEach((w) => remoteSession?.send({ t: 'res', re: w.cid, cmd: 'buy', ok, text: String(text).slice(0, 900), at: Date.now(), ...extra }, { via: w.via }));
+function remoteFinish() {
+  const text = lastBuyResult?.text || 'Done.';
+  remoteLastDone = { at: Date.now(), text: text.slice(0, 600) };
+  remoteTell(text, true);
+  remoteWatchers = [];
+  remoteLast();
+}
+// a buy started on the PC itself: phones that pressed Buy meanwhile get its result when it ends (at most 3 minutes)
+function remoteWaitLocal() {
+  if (remoteLocalWait) return;
+  const t0 = Date.now();
+  remoteLocalWait = setInterval(() => {
+    if (shopBusy && Date.now() - t0 < 180000) return;
+    clearInterval(remoteLocalWait); remoteLocalWait = null;
+    if (remoteBuying) return; // a phone's buy took over: its watchers are served there
+    if (shopBusy) { remoteTell('Still buying on the PC; check again in a moment.', true); remoteWatchers = []; return; }
+    remoteFinish();
+    remoteHeartbeat();
+  }, 1000);
 }
 let remoteGen = 0;
 async function remoteRestart() {
@@ -4620,7 +4722,7 @@ async function remoteRestart() {
   remoteSession = relay.connect(settings.remoteCode, {
     onMsg: (m, o) => remoteOnMessage(m, o),
     onState: (n) => { if (n) { remoteHeartbeat(); remoteLast(); } }, // (re)connected: put the status back on the broker
-    will: { t: 'hb', v: MOD_VERSION, ok: false, off: true, why: 'the game tab on the PC closed, or the PC lost its internet', at: Date.now() },
+    will: { t: 'hb', v: MOD_VERSION, pc: remotePcId(), ok: false, off: true, why: 'the game tab on the PC closed, or the PC lost its internet', at: Date.now() },
   });
   // the ntfy app's notification buttons ("Buy on PC", "Stop"): owner key only
   if (settings.remoteAlerts !== false) remoteNtfyStop = relay.ntfyListen(k.ntfyCmd, async (text) => { const r = await relay.unseal(k, text); if (r?.via === 'o') remoteOnMessage(r.m, { via: 'o', app: true }); }, '30s');
