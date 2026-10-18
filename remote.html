@@ -42,7 +42,7 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.4</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.5</small></h1>
   <div id="note" class="muted"></div>
   <section class="card" id="all" hidden>
     <div id="allstate" class="state"></div>
@@ -52,11 +52,12 @@
   <div id="pcs"></div>
   <section class="card">
     <details id="pair"><summary>Add or share codes</summary>
-      <p class="muted">Paste one or more links or codes (from the game on a PC: Settings → 📱 Phone remote → "Copy phone link", or someone's "Buy-only link"). Opening such a link adds them too. Codes stay on this phone: they're after the # in the link, which isn't sent to the website.</p>
-      <textarea id="codes" placeholder="mglh-… or mglhs-… (one or more)" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+      <p class="muted">Paste one or more links or codes (from the game on a PC: Settings → 📱 Phone remote → "Copy phone link"<span class="pools">, or someone's "Buy-only link"</span>). Opening such a link adds them too. Codes stay on this phone: they're after the # in the link, which isn't sent to the website.</p>
+      <textarea id="codes" placeholder="mglh-… (one or more)" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
       <button id="add">Add</button>
-      <div class="two"><button id="share">Share Buy-only link</button><button id="copyall">Copy full link</button></div>
-      <p class="muted">The Buy-only link lets whoever opens it press Buy on these PCs (only on the ones whose owner switched sharing on) and see what's to buy there; it can't be turned into your pairing codes. The full link is for your own other devices only: it can also Reconnect your PCs.</p>
+      <div class="two"><button id="share" class="pools">Share Buy-only link</button><button id="copyall">Copy full link</button></div>
+      <p class="muted pools">The Buy-only link lets whoever opens it press Buy on these PCs (only on the ones whose owner switched sharing on) and see what's to buy there; it can't be turned into your pairing codes.</p>
+      <p class="muted">The full link is for your own devices only: it can also Reconnect your PCs.</p>
       <div id="pairres" class="res muted"></div>
     </details>
     <label class="opt"><input type="checkbox" id="pics"> Show item pictures</label>
@@ -66,6 +67,7 @@
 <script>
 'use strict';
 const W = window;
+const POOLS = true;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote).
 // A browser can't accept connections, so the PC and the phone can't talk to each other directly: both connect out to a
@@ -342,10 +344,13 @@ const relay = {
   if (!Array.isArray(removed)) removed = [];
   const saveRemoved = () => store.set('mglhRemoteRemoved', JSON.stringify(removed.slice(-50)));
   let skipped = [];
-  codes = [...new Set(codes.filter(relay.validAny))];
+  // the build without Buy-only links only takes pairing codes
+  const usable = (c) => (POOLS ? relay.validAny(c) : relay.valid(c));
+  if (!POOLS) document.querySelectorAll('.pools').forEach((el) => el.remove());
+  codes = [...new Set(codes.filter(usable))];
   const saveCodes = () => store.set('mglhRemoteCodes', JSON.stringify(codes));
   // A link (…#mglh-CODE, …#mglhs-A,mglhs-B) adds its codes, then the # part is removed from the address bar
-  { const found = relay.findCodes(location.hash); if (found.length) { found.forEach((c) => { if (removed.includes(c)) { if (!codes.includes(c)) skipped.push(c); } else if (!codes.includes(c)) codes.push(c); }); try { history.replaceState(null, '', location.pathname + location.search); } catch {} } }
+  { const found = relay.findCodes(location.hash).filter(usable); if (found.length) { found.forEach((c) => { if (removed.includes(c)) { if (!codes.includes(c)) skipped.push(c); } else if (!codes.includes(c)) codes.push(c); }); try { history.replaceState(null, '', location.pathname + location.search); } catch {} } }
   saveCodes();
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
@@ -479,8 +484,8 @@ const relay = {
   };
   $('buyall').onclick = () => { const ready = pcs.filter(canBuy); const sent = ready.filter((e) => command(e, 'buy')).length; $('allres').textContent = `Sent Buy to ${sent} PC${sent === 1 ? '' : 's'}.`; };
   $('add').onclick = async () => {
-    const found = relay.findCodes($('codes').value);
-    if (!found.length) { $('pairres').innerHTML = '<span class="bad">No codes in there (they start with mglh- or mglhs-).</span>'; return; }
+    const found = relay.findCodes($('codes').value).filter(usable);
+    if (!found.length) { $('pairres').innerHTML = `<span class="bad">No codes in there (they start with ${POOLS ? 'mglh- or mglhs-' : 'mglh-'}).</span>`; return; }
     // already here: the same code, or the Buy-only code of a PC whose pairing code is here
     const here = new Set(codes);
     for (const c of [...codes, ...found]) if (relay.valid(c)) here.add(await relay.shareOf(c));
@@ -495,7 +500,7 @@ const relay = {
     try { await navigator.clipboard.writeText(link); $('pairres').textContent = `${what} copied.`; } catch { prompt(what + ':', link); }
   };
   const base = () => location.origin + location.pathname;
-  $('share').onclick = async () => {
+  ($('share') || {}).onclick = async () => {
     if (!pcs.length) return;
     const list = [...new Set(pcs.map((e) => e.share))];
     giveLink(`${base()}#${list.join(',')}`, 'Buy-only link');

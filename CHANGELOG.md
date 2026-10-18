@@ -1,5 +1,13 @@
 # MG Lategame Helper: changelog
 
+## 0.18.5
+- 🤔 Maybe sell lists only pets that are one backup copy short of the normal rules: the same rules with one fewer better pet needed ("Maybe sell: fewer better pets needed" in Settings).
+  - It no longer drops the other protections. The Gold/Rainbow collection (your best Gold/Rainbow of each species and ability mix), extra copies of hunger and Rainbow pets, Gold pets with a long-term ability, the best of each ability mix and pets your journal still needs stay out of it.
+  - Hunger and Rainbow pets were loosened by two copies instead of one before; now by one.
+  - On the test copy of your pets (Sept 30): 35 → 15.
+  - The reason reads e.g. "left out: 1 better pet; sold at 2".
+- Two builds of each version from now on: the full one, and one without Buy-only links (no "Let people with my Buy-only link press Buy" setting; the PC ignores Buy-only codes; the phone page only takes pairing codes and has no "Share Buy-only link"). Several of your own PCs on one phone page work in both.
+
 ## 0.18.4
 - Phone page: a PC removed with ✕ stays removed after reloading the page.
   - The code saved by versions before 0.18.0 was copied back into the list on every load; it's now moved over once and the old entry is deleted.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.18.4
+// @version      0.18.5
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,8 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.18.4';
+const MOD_VERSION = '0.18.5';
+const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
 // Phone ↔ PC relay (📱 Phone remote).
@@ -1574,20 +1575,20 @@ function analyze() {
   for (const p of useless) { const why = onTeam.get(p.id); if (why) keptByYou.push({ p, why }); else stillUseless.push(p); }
   result.useless = stillUseless;
   keptByYou.sort((x, y) => listOrder(x.p, y.p));
-  // "Maybe sell": the same rules applied loosely (one fewer better pet needed; no collection, extra-copy, Gold or
-  // same-species protections). Lists pets only those softer protections keep, with the reason. Named pets, your own
-  // keep rules and pets on a best team stay out of it.
+  // "Maybe sell": pets that are one backup copy away from being useless: the same rules with one fewer better pet
+  // needed (Settings: "Maybe sell: fewer better pets needed"). Every protection stays: the Gold/Rainbow collection, the
+  // best of each ability mix, extra copies of hunger and Rainbow pets, Gold with a long-term ability, pets your journal
+  // still needs, named pets, your own keep rules and pets on a best team.
   const lax = analyzeRules(data.pets.map((p) => ({ ...p })), { ...opts,
-    leaveOutThreshold: Math.max(1, (settings.leaveOutThreshold ?? 2) - (settings.maybeLooser ?? 1)), specificUseThreshold: Math.max(1, (settings.specificUseThreshold ?? 3) - (settings.maybeLooser ?? 1)),
-    collectMutations: false, collectThreeAbility: false, collectMix: false, tripleCompare: settings.collectThreeAbility !== false, collectUniqueMutated: false, extraCopies: false, mutSameSpecies: false, protectLongTermGold: false });
+    leaveOutThreshold: Math.max(1, (settings.leaveOutThreshold ?? 2) - (settings.maybeLooser ?? 1)), specificUseThreshold: Math.max(1, (settings.specificUseThreshold ?? 3) - (settings.maybeLooser ?? 1)) });
   const strictUseless = new Set(useless.map((p) => p.id));
   const roleWord = { leaveOut: 'left out', specificUse: 'specific use' };
   result.maybe = lax.useless.filter((lp) => !strictUseless.has(lp.id) && !onTeam.has(lp.id)).map((lp) => {
     const p = r.pets.find((q) => q.id === lp.id);
-    if (!p || p.named || keepBecause(p)) return null;
+    if (!p || p.named || keepBecause(p) || p.unlogged?.length || p.collection) return null;
     const why = p.collection ? collectionWhy(p)
       : p.goldMatters ? 'Gold with a long-term ability'
-      : Object.entries(p.roles).filter(([, x]) => !x.deletable).map(([role, x]) => `${roleWord[role]}: ${x.beatenBy.length} better, needs ${x.threshold}`).join(' · ') || 'kept by a softer rule';
+      : Object.entries(p.roles).filter(([, x]) => !x.deletable).map(([role, x]) => `${roleWord[role]}: ${x.beatenBy.length} better ${x.beatenBy.length === 1 ? 'pet' : 'pets'}; sold at ${x.threshold}`).join(' · ') || 'kept by a softer rule';
     return { p, why };
   }).filter(Boolean).sort((x, y) => listOrder(x.p, y.p));
 }
@@ -2975,9 +2976,9 @@ function renderSettings(bar, body) {
       ${chk('featRemote', 'Let my phone press Buy and Reconnect on this PC')}
       ${settings.featRemote && settings.remoteCode ? `<div>Pairing code: <code style="user-select:all">${esc(settings.remoteCode)}</code> <button class="mini" data-a="remotecopy">Copy phone link</button> <button class="mini" data-a="remotenew" title="Make a new code: phones paired with the old one, and Buy-only links, stop working">New code</button> <span class="muted">${esc(remoteStatusText())}</span></div>
       <label>Name shown on phones <input type="text" data-f="remoteName" value="${esc(settings.remoteName || '')}" maxlength="24" placeholder="(optional)" style="width:130px"></label>
-      ${chk('remoteShare', 'Let people with my Buy-only link press Buy on this PC')}${settings.remoteShare && remoteKeys ? ` <button class="mini" data-a="remotesharecopy">Copy Buy-only link</button>` : ''}
+      ${REMOTE_POOLS ? `${chk('remoteShare', 'Let people with my Buy-only link press Buy on this PC')}${settings.remoteShare && remoteKeys ? ' <button class="mini" data-a="remotesharecopy">Copy Buy-only link</button>' : ''}` : ''}
       ${chk('remoteAlerts', 'Also send 🔁 repeating alerts and Buy results to the ntfy phone app')}${remoteKeys?.ntfyAlerts ? ` <span class="muted">(subscribe to <code style="user-select:all">${esc(remoteKeys.ntfyAlerts)}</code> in the app)</span>` : ''}` : ''}
-      <div class="muted">Open the copied link on your phone: a small page with your PC's shop status and a Buy button (nothing to install; bookmark it). It works while this game is open on the PC. The PC only takes these commands from the phone: Buy (the same as pressing Buy everything here), Reconnect (only while the game here is disconnected), Stop (repeating alerts) and a status refresh; the phone only gets what's to buy and the time to the next restock. Messages go through public MQTT relay servers (HiveMQ and EMQX, no account or limit), encrypted with keys made from the code, which never leaves your PC and phone. Keep the phone link to yourself; "New code" makes old links stop working. Nothing reconnects by itself: Reconnect only runs when you press it on the phone.<br>The Buy-only link is for other people: with it they can only press Buy (when sharing is on) and see what's to buy here. It can't be turned back into your pairing code. Switching sharing off stops them; "New code" also makes the link stop working.</div></details>
+      <div class="muted">Open the copied link on your phone: a small page with your PC's shop status and a Buy button (nothing to install; bookmark it). It works while this game is open on the PC. The PC only takes these commands from the phone: Buy (the same as pressing Buy everything here), Reconnect (only while the game here is disconnected), Stop (repeating alerts) and a status refresh; the phone only gets what's to buy and the time to the next restock. Messages go through public MQTT relay servers (HiveMQ and EMQX, no account or limit), encrypted with keys made from the code, which never leaves your PC and phone. Keep the phone link to yourself; "New code" makes old links stop working. Nothing reconnects by itself: Reconnect only runs when you press it on the phone.${REMOTE_POOLS ? '<br>The Buy-only link is for other people: with it they can only press Buy (when sharing is on) and see what\'s to buy here. It can\'t be turned back into your pairing code. Switching sharing off stops them; "New code" also makes the link stop working.' : ''}</div></details>
     <details data-sec="shop"${secOpen('shop')}><summary><b>🛒 Shop</b></summary>
       ${chk('buyPotions', 'Also buy XP and Hunger potions (Magic Dust)')}
       ${chk('featRareAlert', '🔔 Alert when a rare item is in stock')}
@@ -3091,7 +3092,7 @@ function onClick(e) {
   if (a === 'tabreset') { settings.tabOrder = []; saveSettings(); render(); return; }
   if (a === 'chimetest') { chime(); return; }
   if (a === 'remotenew') { remoteRetire(); settings.remoteCode = relay.newCode(); saveSettings(); setTimeout(() => { remoteRestart(); render(); }, 1500); render(); return; }
-  if (a === 'remotesharecopy') { const link = remoteShareLink(); if (!link) return; try { navigator.clipboard.writeText(link); toast('Buy-only link copied: whoever opens it can press Buy on this PC while sharing is on, and see what\'s to buy here.', { key: 'remote', ms: 7000 }); } catch { prompt('Buy-only link:', link); } return; }
+  if (a === 'remotesharecopy' && REMOTE_POOLS) { const link = remoteShareLink(); if (!link) return; try { navigator.clipboard.writeText(link); toast('Buy-only link copied: whoever opens it can press Buy on this PC while sharing is on, and see what\'s to buy here.', { key: 'remote', ms: 7000 }); } catch { prompt('Buy-only link:', link); } return; }
   if (a === 'remotecopy') { const link = remotePageLink(); try { navigator.clipboard.writeText(link); toast('Phone link copied: open it on your phone (send it to yourself, or type it in).', { key: 'remote', ms: 6000 }); } catch { prompt('Phone link:', link); } return; }
   if (a === 'alertmenu') { openAlertMenu(); return; }
   if (a === 'buymenu') { openBuyMenu(); return; }
@@ -4580,6 +4581,8 @@ const REMOTE_MAX_AGE = 5 * 60000, REMOTE_APP_MAX_AGE = 30 * 60000;
 // The phone page lives in the mod's GitHub repo (GitHub Pages); the code goes after the #, which never leaves the phone
 const REMOTE_PAGE = 'https://godgamerover9k.github.io/MG-late-game-helper/remote.html';
 const remotePageLink = () => `${REMOTE_PAGE}#${settings.remoteCode}`;
+// Buy-only links (people pressing Buy on this PC): only while switched on, and not at all in the build without them
+const remoteSharing = () => REMOTE_POOLS && !!settings.remoteShare;
 const remoteShareLink = () => (remoteKeys?.share ? `${REMOTE_PAGE}#${remoteKeys.share}` : '');
 // commands already run (kept in this tab across a reload, so a command can't be run twice by sending it again)
 const remoteSeen = (() => {
@@ -4605,7 +4608,7 @@ function remoteStatus() {
   const SPR = 'https://mg-api.ariedam.fr/assets/sprites/';
   const items = (c?.items ?? []).slice(0, 36).map((i) => { const u = shopImgUrl(i); return [String(pretty(i.name)).slice(0, 28), i.left, u.startsWith(SPR) ? u.slice(SPR.length, SPR.length + 60) : '']; });
   const hb = { t: 'hb', v: MOD_VERSION, pc: remotePcId(), name: String(settings.remoteName || '').slice(0, 24), ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
-    units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying, share: !!settings.remoteShare, at: Date.now() };
+    units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying, share: remoteSharing(), at: Date.now() };
   // keep the status small (well under the brokers' limits): pictures go first, then the end of the list
   const size = () => new TextEncoder().encode(JSON.stringify(hb)).length * 1.4;
   if (size() > 3800) hb.items = hb.items.map(([n, q]) => [n, q, '']);
@@ -4632,7 +4635,7 @@ const remoteSig = () => { try { const c = collectShopBuy(); return c.restocks + 
 async function remoteHeartbeat() {
   if (!settings.featRemote || !remoteSession) return;
   remoteLastHb = Date.now(); remoteLastSig = remoteSig();
-  remoteSession.send(remoteStatus(), { retain: true, via: settings.remoteShare ? 's' : 'o' });
+  remoteSession.send(remoteStatus(), { retain: true, via: remoteSharing() ? 's' : 'o' });
 }
 // the last buy's result: owner key only
 const remoteLast = () => { if (lastBuyResult) remoteSession?.send({ t: 'last', res: { at: lastBuyResult.at, text: lastBuyResult.text.slice(0, 900) } }, { retain: true, via: 'o' }); };
@@ -4647,7 +4650,7 @@ async function remoteOnMessage(m, { via, part = '/m', app = false } = {}) {
   if (!Number.isFinite(ts)) return;
   if (app) { const exp = Number(m.exp); if (!(exp >= now && exp - ts <= REMOTE_APP_MAX_AGE)) return; }
   else if (Math.abs(now - ts) > REMOTE_MAX_AGE) { reply(`Not done: this phone's clock and the PC's differ by ${Math.round(Math.abs(now - ts) / 60000)} minutes (5 at most). Set both to the automatic time.`, false); return; }
-  if (via === 's' && !settings.remoteShare) { if (m.t === 'buy') reply("This PC isn't taking Buy from shared links right now.", false); return; }
+  if (via === 's' && !remoteSharing()) { if (REMOTE_POOLS && m.t === 'buy') reply("This PC isn't taking Buy from shared links right now.", false); return; }
   if (m.t === 'ping') { if (now - remoteLastPing > 3000) { remoteLastPing = now; await remoteHeartbeat(); } return; }
   if (m.t === 'stop') { rareStop(); reply('Repeating alerts stopped until the next restock.'); return; }
   if (m.t === 'reconnect') {
