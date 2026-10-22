@@ -1,5 +1,15 @@
 # MG Lategame Helper: changelog
 
+## 0.18.7
+- 🤔 Maybe sell leaves out pets you locked in the game (you already chose to keep them). They still show in Useless, with Unlock, when the normal rules flag them. On your pet list from Oct 22: 28 → 23.
+
+## 0.18.6
+- Works with game release 1714. The game's room connection no longer hands out the room state (subscribeToPatches and lastRoomStateJsonable are gone), so the panel stayed on "Waiting for the game… join your garden".
+  - The mod now reads the room state from the game's store (stateAtom, through window.__jotaiStore: get, and sub for changes). Nothing in the game is patched.
+  - Older releases still use the connection as before.
+  - Commands are sent the same way as before (the connection's sendMessage is unchanged).
+- The pet-list console script (mg-grab-pets.js) reads the state and your player id from the store too (the connection's address no longer carries the player id).
+
 ## 0.18.5
 - 🤔 Maybe sell lists only pets that are one backup copy short of the normal rules: the same rules with one fewer better pet needed ("Maybe sell: fewer better pets needed" in Settings).
   - It no longer drops the other protections. The Gold/Rainbow collection (your best Gold/Rainbow of each species and ability mix), extra copies of hunger and Rainbow pets, Gold pets with a long-term ability, the best of each ability mix and pets your journal still needs stay out of it.

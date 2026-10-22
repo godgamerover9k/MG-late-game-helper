@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.18.5
+// @version      0.18.7
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.18.5';
+const MOD_VERSION = '0.18.7';
 const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
@@ -582,16 +582,40 @@ const game = (() => {
   let attachedTo = null;
 
   const setState = (s) => { if (s && typeof s === 'object') { state = s; listeners.forEach((f) => { try { f(); } catch (e) { console.error(e); } }); } };
+  // Release 1714+: the room connection no longer hands out the room state (no subscribeToPatches / lastRoomStateJsonable);
+  // the game keeps it in its store as stateAtom. Read through the store the game provides (window.__jotaiStore: get, and
+  // sub to hear about changes); nothing in the game is patched.
+  let storeLink = null; // { st, atom, unsub }
+  const attachStore = () => {
+    const st = W.__jotaiStore || W.__jotaiStore__;
+    const cache = W.jotaiAtomCache?.cache;
+    if (!st || typeof st.get !== 'function' || !cache) return;
+    if (storeLink && storeLink.st === st) { if (!storeLink.unsub) { try { setState(st.get(storeLink.atom)); } catch {} } return; }
+    let atom = null;
+    for (const a of cache.values()) {
+      if (String(a?.debugLabel || a?.label || '') !== 'stateAtom') continue;
+      let v; try { v = st.get(a); } catch { continue; }
+      if (v?.child?.data?.userSlots || v?.data?.players) { atom = a; break; }
+    }
+    if (!atom) return;
+    let unsub = null;
+    try { if (typeof st.sub === 'function') unsub = st.sub(atom, () => { try { setState(st.get(atom)); } catch {} }); } catch {}
+    storeLink = { st, atom, unsub: typeof unsub === 'function' ? unsub : null };
+    try { setState(st.get(atom)); } catch {}
+  };
   const tryAttach = () => {
     const rc = W.MagicCircle_RoomConnection;
-    if (!rc || rc === attachedTo) return;
-    attachedTo = rc;
-    try {
-      const r = rc.subscribeToPatches?.((_patches, full) => setState(full));
-      if (r && typeof r === 'object' && r.currentState) setState(r.currentState);
-    } catch {}
-    try { rc.subscribeToWelcome?.((s) => setState(s)); } catch {}
-    if (!state && rc.lastRoomStateJsonable) setState(rc.lastRoomStateJsonable);
+    // older releases: the connection's own patch feed
+    if (rc && rc !== attachedTo && typeof rc.subscribeToPatches === 'function') {
+      attachedTo = rc;
+      try {
+        const r = rc.subscribeToPatches((_patches, full) => setState(full));
+        if (r && typeof r === 'object' && r.currentState) setState(r.currentState);
+      } catch {}
+      try { rc.subscribeToWelcome?.((s) => setState(s)); } catch {}
+      if (!state && rc.lastRoomStateJsonable) setState(rc.lastRoomStateJsonable);
+    }
+    if (!(attachedTo && typeof attachedTo.subscribeToPatches === 'function')) attachStore();
   };
   setInterval(tryAttach, 1000);
   tryAttach();
@@ -1585,7 +1609,8 @@ function analyze() {
   const roleWord = { leaveOut: 'left out', specificUse: 'specific use' };
   result.maybe = lax.useless.filter((lp) => !strictUseless.has(lp.id) && !onTeam.has(lp.id)).map((lp) => {
     const p = r.pets.find((q) => q.id === lp.id);
-    if (!p || p.named || keepBecause(p) || p.unlogged?.length || p.collection) return null;
+    // locked in the game: you already chose to keep it
+    if (!p || p.named || keepBecause(p) || p.unlogged?.length || p.collection || data.locked?.has(p.id)) return null;
     const why = p.collection ? collectionWhy(p)
       : p.goldMatters ? 'Gold with a long-term ability'
       : Object.entries(p.roles).filter(([, x]) => !x.deletable).map(([role, x]) => `${roleWord[role]}: ${x.beatenBy.length} better ${x.beatenBy.length === 1 ? 'pet' : 'pets'}; sold at ${x.threshold}`).join(' · ') || 'kept by a softer rule';
