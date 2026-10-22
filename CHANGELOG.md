@@ -1,5 +1,12 @@
 # MG Lategame Helper: changelog
 
+## 0.18.8
+- Buying no longer stays blocked after the game's connection drops and comes back (e.g. after the tab sat in the background). The game opens a new connection, sometimes without the "Welcome" message the mod waited for, and the mod then said it wasn't connected and blocked Buy everything until the page was reloaded.
+  - The mod now follows the new connection by the numbers the game shows on it: the last command the server executed (in every room frame) and the highest number sent on it. This works whether the game carries on with its numbering or starts again.
+  - If another game connection is already open when the old one closes, the mod switches to it at once.
+  - While no game connection is open, Buy shows "Waiting for the game to (re)connect: this clears by itself once the game is back" instead of asking for a reload.
+- 📱 The phone remote's connections to the relay servers use the browser's own WebSocket, so the mod's watcher for the game's connection never sees them.
+
 ## 0.18.7
 - 🤔 Maybe sell leaves out pets you locked in the game (you already chose to keep them). They still show in Useless, with Unlock, when the normal rules flag them. On your pet list from Oct 22: 28 → 23.
 

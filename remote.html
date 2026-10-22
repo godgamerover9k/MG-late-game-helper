@@ -42,7 +42,7 @@
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.7</small></h1>
+  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.18.8</small></h1>
   <div id="note" class="muted"></div>
   <section class="card" id="all" hidden>
     <div id="allstate" class="state"></div>
@@ -226,7 +226,8 @@ const relay = {
   connect(codes, { onMsg, onState, will } = {}) {
     const g = typeof globalThis !== 'undefined' ? globalThis : {};
     const W0 = typeof W !== 'undefined' ? W : g;
-    const WS = W0.__mglhWS || g.__mglhWS || W0.WebSocket || g.WebSocket;
+    // in the mod, the browser's own WebSocket (not the one the mod watches for the game's connection)
+    const WS = W0.__mglhWS || g.__mglhWS || (typeof net !== 'undefined' && net?.NativeWS) || W0.WebSocket || g.WebSocket;
     const brokers = W0.__mglhBrokers || g.__mglhBrokers || MQTT_BROKERS;
     const list = [...new Set((Array.isArray(codes) ? codes : [codes]).filter(relay.validAny))];
     const byTopic = new Map(), byCode = new Map(), seen = new Set(), seenList = [];

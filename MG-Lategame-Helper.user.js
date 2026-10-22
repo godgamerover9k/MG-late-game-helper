@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.18.7
+// @version      0.18.8
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.18.7';
+const MOD_VERSION = '0.18.8';
 const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
@@ -191,7 +191,8 @@ const relay = {
   connect(codes, { onMsg, onState, will } = {}) {
     const g = typeof globalThis !== 'undefined' ? globalThis : {};
     const W0 = typeof W !== 'undefined' ? W : g;
-    const WS = W0.__mglhWS || g.__mglhWS || W0.WebSocket || g.WebSocket;
+    // in the mod, the browser's own WebSocket (not the one the mod watches for the game's connection)
+    const WS = W0.__mglhWS || g.__mglhWS || (typeof net !== 'undefined' && net?.NativeWS) || W0.WebSocket || g.WebSocket;
     const brokers = W0.__mglhBrokers || g.__mglhBrokers || MQTT_BROKERS;
     const list = [...new Set((Array.isArray(codes) ? codes : [codes]).filter(relay.validAny))];
     const byTopic = new Map(), byCode = new Map(), seen = new Set(), seenList = [];
@@ -350,17 +351,36 @@ const net = (() => {
   const note = (e) => { trace.push({ t: Date.now() % 1e7, ...e }); if (trace.length > 400) trace.shift(); };
   try { W.__mglhNet = () => JSON.stringify({ next, frontier, lastOk, desync, desyncAt, seeded, others: (() => { try { return others(); } catch { return []; } })(), trace }); } catch {}
 
+  // Game connections this mod watches (the game opens a new one after a drop, e.g. when the tab was in the background)
+  const gameSockets = new Set();
+  // Pick up a game connection from what it has shown: the last number the server executed on it (every room frame carries
+  // it) and the highest number sent on it. Used when the game reconnects without a Welcome on the new connection, so
+  // buying doesn't stay blocked until a reload.
+  const seedFrom = (ws, why) => {
+    if (!ws || ws.readyState !== 1 || !Number.isFinite(ws.__mgpcExec)) return false;
+    frontier = ws.__mgpcExec; lastOk = ws.__mgpcExec;
+    next = Math.max(ws.__mgpcExec + 1, (ws.__mgpcMaxSent || 0) + 1);
+    seeded = true; desync = false; socket = ws;
+    note({ ev: 'reseed', why, exec: ws.__mgpcExec, next });
+    return true;
+  };
   const onMessage = (ev) => {
     const raw = ev.data;
     if (typeof raw !== 'string') return;
     const ex = /"executedCommandSequence"\s*:\s*(\d+)/.exec(raw);
-    if (ex) { if (Number(ex[1]) > frontier) note({ ev: 'frame', exec: Number(ex[1]) }); frontier = Math.max(frontier, Number(ex[1])); if (desync && frontier >= desyncAt) desync = false; } // the server got past the unanswered one
+    if (ex) {
+      const ws = ev.target, e = Number(ex[1]);
+      if (ws) { ws.__mgpcExec = Math.max(ws.__mgpcExec ?? 0, e); gameSockets.add(ws); }
+      if (!socket || ws === socket) { if (e > frontier) note({ ev: 'frame', exec: e }); frontier = Math.max(frontier, e); if (desync && frontier >= desyncAt) desync = false; } // the server got past the unanswered one
+      // no game connection being followed (it closed, or the Welcome was missed): follow this one
+      if ((!seeded || !socket) && raw.indexOf('"Welcome"') === -1) seedFrom(ws, 'frame');
+    }
     if (raw.indexOf('"Welcome"') === -1 && raw.indexOf('QuinoaCommandResult') === -1) return;
     let j;
     try { j = JSON.parse(raw); } catch { return; }
     if (j?.type === 'Welcome') {
       const executed = Number(j.executedCommandSequence);
-      if (Number.isFinite(executed) && executed >= 0) { next = executed + 1; frontier = executed; lastOk = executed; seeded = true; desync = false; socket = ev.target; }
+      if (Number.isFinite(executed) && executed >= 0) { next = executed + 1; frontier = executed; lastOk = executed; seeded = true; desync = false; socket = ev.target; if (socket) { socket.__mgpcExec = executed; gameSockets.add(socket); } }
     } else if (j?.type === 'QuinoaCommandResult') {
       // Any answer other than a number complaint means that number was taken in order
       const n = sentNum.get(j.requestId);
@@ -402,6 +422,7 @@ const net = (() => {
             next = final + 1;
           }
           sentNum.set(env.requestId, Number(env.commandSequence));
+          this.__mgpcMaxSent = Math.max(this.__mgpcMaxSent || 0, Number(env.commandSequence) || 0); gameSockets.add(this);
           note({ ev: 'send', n: Number(env.commandSequence), was: num, type: env.command.type, ours, ...(/Storage/.test(env.command.type) ? { cmd: env.command } : {}) });
           if (sentNum.size > 500) sentNum.delete(sentNum.keys().next().value);
         }
@@ -415,7 +436,13 @@ const net = (() => {
     ws.__mgpc = true;
     try { Object.defineProperty(ws, 'send', { value: instanceSend, writable: true, configurable: true }); } catch {}
     ws.addEventListener('message', onMessage);
-    ws.addEventListener('close', () => { if (socket === ws) { socket = null; seeded = false; } });
+    ws.addEventListener('close', () => {
+      gameSockets.delete(ws);
+      if (socket !== ws) return;
+      socket = null; seeded = false;
+      // another game connection already open and showing numbers: follow it straight away
+      for (const other of gameSockets) if (seedFrom(other, 'close')) break;
+    });
   };
 
   W.WebSocket = new Proxy(NativeWS, {
@@ -440,6 +467,7 @@ const net = (() => {
   // command you press goes out and serves as the check: answered = numbering fine; invalid_sequence = it steps down.
   const readiness = (strict = false) => {
     if (desync && strict) return { ok: false, reason: "A command got no answer from the game. Move or do anything in the game (so a command goes through), then try again; if it keeps happening, reload the page." };
+    if (!seeded && !socket) return { ok: false, reason: 'Waiting for the game to (re)connect: this clears by itself once the game is back.' };
     if (!seeded) return { ok: false, reason: 'The mod started after the game connected. Reload the page once so it can sync, then selling works.' };
     if (!socket || socket.readyState !== 1 || socket.send !== instanceSend) return { ok: false, reason: 'Not connected to the game right now (or the connection is not one this mod can watch). Reload the page.' };
     const rc = W.MagicCircle_RoomConnection;
@@ -536,7 +564,7 @@ const net = (() => {
     if (!lastPosition || !socket || socket.readyState !== 1) return false;
     try { socket.send(JSON.stringify({ scopePath: ['Room', 'Quinoa'], type: 'PlayerPosition', position: { ...lastPosition } })); return true; } catch { return false; }
   };
-  return { send, readiness, others, authorizeSell, revokeSell, pingPosition, lastPosition: () => lastPosition, socketNow: () => socket, onSent: (f) => sentListeners.add(f) };
+  return { NativeWS, send, readiness, others, authorizeSell, revokeSell, pingPosition, lastPosition: () => lastPosition, socketNow: () => socket, onSent: (f) => sentListeners.add(f) };
 })();
 
 // ---- Hatch guard: lets the UI stop a hatch while the Strength Crystal isn't out ----
