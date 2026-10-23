@@ -1,5 +1,13 @@
 # MG Lategame Helper: changelog
 
+## 0.19.1
+- 📱 Game notifications: the game's 🌙 Day & Night and 🌦️ Weather notifications are now on the screen too, at the top.
+  - Day & Night: "Night falls" (sunset, when the Spooky shop opens), "Midnight", "The sun rises" (the game's QuinoaDayNightPhase: sunset / midnight / sunrise). The phone app only offers these at the weather station, and only until one is set.
+  - Weather: one switch per weather from the game data (Rain, Snow, Thunderstorm, Dawn, Amber Moon, Sunny; QuinoaWeatherActive).
+  - Both are hidden while a shop is picked in the shop filter.
+- Spooky shop items stay "not offered": the game's server refused all 10 of them (3 seeds, the egg, the tool, 5 decor) with "Invalid input" (tested 2026-10-22). Night falls is the notification for the Spooky shop.
+- The game data now also includes the weather list (mg-api …/data/weathers).
+
 ## 0.19.0
 - 📱 Game notifications (phone app): Settings → 🛒 Shop → "📱 Game notifications (phone app)…". This is a screen for the game's own restock notifications, the ones the Magic Garden phone app sends.
   - They're saved on your account on the game's server, so the app follows what you set here. The app may show it after reopening.

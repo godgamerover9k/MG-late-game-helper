@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.19.0
+// @version      0.19.1
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.19.0';
+const MOD_VERSION = '0.19.1';
 const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
@@ -1574,7 +1574,7 @@ const LIVE_MAX_AGE = 24 * 60 * 60 * 1000;
 let liveData = null, liveStatus = { source: 'built-in', at: null, error: null };
 let liveNames = {};
 const useLive = (d, at) => {
-  liveData = { pets: d.pets, abilities: d.abilities, eggs: d.eggs, items: d.items, decors: d.decors, plants: d.plants };
+  liveData = { pets: d.pets, abilities: d.abilities, eggs: d.eggs, items: d.items, decors: d.decors, plants: d.plants, weathers: d.weathers };
   liveNames = Object.fromEntries(Object.entries((d.abilities && (d.abilities.data || d.abilities)) || {}).map(([id, a]) => [id, a && a.name]).filter(([, n]) => typeof n === 'string'));
   refreshRulesMeta(liveData);
   liveStatus = { source: 'live', at, error: null };
@@ -1590,8 +1590,8 @@ async function loadLiveData(force) {
     const doFetch = typeof W.fetch === 'function' ? W.fetch.bind(W) : fetch;
     const get = async (name) => { const r = await doFetch(LIVE_URL + name, { credentials: 'omit' }); if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`); return r.json(); };
     const [pets, abilities, eggs] = await Promise.all([get('pets'), get('abilities'), get('eggs')]);
-    const [items, decors, plants] = await Promise.all([get('items').catch(() => null), get('decors').catch(() => null), get('plants').catch(() => null)]); // shop rules + prices only
-    const fresh = { at: Date.now(), pets, abilities, eggs, items, decors, plants };
+    const [items, decors, plants, weathers] = await Promise.all([get('items').catch(() => null), get('decors').catch(() => null), get('plants').catch(() => null), get('weathers').catch(() => null)]); // shop rules + prices; weather names
+    const fresh = { at: Date.now(), pets, abilities, eggs, items, decors, plants, weathers };
     useLive(fresh, fresh.at);
     store.set('liveData', fresh);
   } catch (e) {
@@ -3911,12 +3911,24 @@ function notifCatalog() {
     for (const [id, d] of Object.entries(unwrapLive(liveData?.[kind]) ?? {})) {
       const shops = (d?.seed?.eligibleShops ?? d?.eligibleShops ?? []).map((x) => String(x).toLowerCase());
       if (!shops.length) continue; // never sold in a shop
-      out.push({ itemType, id, name: d?.seed?.name ?? d?.name ?? id, subject: NOTIF_SUBJECT[itemType], shops,
-        // the game only offers notifications for items sold somewhere other than the Spooky shop
-        offered: shops.some((x) => x !== 'spooky') });
+      // the game only takes notifications for items sold somewhere other than the Spooky shop (its code says so, and
+      // the server answers "Invalid input" for a Spooky-only seed: tested 2026-10-22)
+      out.push({ itemType, id, name: d?.seed?.name ?? d?.name ?? id, subject: NOTIF_SUBJECT[itemType], shops, offered: shops.some((x) => x !== 'spooky') });
     }
   }
   return out;
+}
+// Weather and day & night notifications (the game's "weather" and "nighttime" categories). Weather ids from the game data
+// (mg-api …/data/weathers), else the ones known in 2026-10; day & night: the game's three phases.
+const NOTIF_WEATHER_FALLBACK = { Rain: 'Rain', Frost: 'Snow', Thunderstorm: 'Thunderstorm', Dawn: 'Dawn', AmberMoon: 'Amber Moon', Sunny: 'Sunny' };
+const NOTIF_DAYNIGHT = [['sunset', '🌇 Night falls (sunset; the Spooky shop opens at night)'], ['midnight', '🌙 Midnight'], ['sunrise', '🌅 The sun rises']];
+function notifExtras() {
+  const live = unwrapLive(liveData?.weathers);
+  const weathers = live && typeof live === 'object' && Object.keys(live).length ? Object.fromEntries(Object.entries(live).map(([id, w]) => [id, w?.name || id])) : NOTIF_WEATHER_FALLBACK;
+  return [
+    ...Object.entries(weathers).map(([id, name]) => ({ key: notifKey({ subject: 'QuinoaWeatherActive', itemId: id }), label: `🌦️ ${name}`, group: 'weather' })),
+    ...NOTIF_DAYNIGHT.map(([id, label]) => ({ key: notifKey({ subject: 'QuinoaDayNightPhase', itemId: id }), label, group: 'daynight' })),
+  ];
 }
 async function openGameNotifs() {
   const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">📱 Game notifications</b><span class="muted gn-sum">loading…</span></div>
@@ -3947,11 +3959,20 @@ async function openGameNotifs() {
       return `<div class="alrt-shop"><div class="alrt-sh"><b>${esc(title)}</b><span class="alrt-bulk muted">all listed: <button class="mini" data-gbulk="1" data-subject="${subject}" title="Notify for every item listed here">🔔</button><button class="mini" data-gbulk="0" data-subject="${subject}" title="No notification for every item listed here">🔕</button></span></div>
         ${items.map((i) => { const key = notifKey({ subject: i.subject, itemId: i.id }); return `<div class="alrt-row"${i.offered ? '' : ' style="opacity:.55"'}>${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${rarityTag(itemRarity(i))} ${shopTags(i)}</span>${sw(key, on.has(key), i.offered)}</div>`; }).join('')}</div>`;
     }).join('');
-    // anything else on your account: weather, day & night, daily quests, items not in the game data
-    const known = new Set(cat.map((i) => notifKey({ subject: i.subject, itemId: i.id })));
+    // weather and day & night (not tied to a shop: hidden while a shop is picked)
+    const extras = notifExtras();
+    const needle = q.value.trim().toLowerCase();
+    const extraRows = (group, title) => {
+      if (shopSel.value) return '';
+      const rows = extras.filter((x) => x.group === group && (!needle || x.label.toLowerCase().includes(needle)) && (f.value === 'all' || (f.value === 'on') === on.has(x.key)));
+      return rows.length ? `<div class="alrt-shop"><div class="alrt-sh"><b>${title}</b></div>${rows.map((x) => `<div class="alrt-row"><span class="alrt-name">${esc(x.label)}</span>${sw(x.key, on.has(x.key))}</div>`).join('')}</div>` : '';
+    };
+    const extrasHtml = extraRows('daynight', '🌙 Day & Night') + extraRows('weather', '🌦️ Weather');
+    // anything else on your account: daily quests, items not in the game data
+    const known = new Set([...cat.map((i) => notifKey({ subject: i.subject, itemId: i.id })), ...extras.map((x) => x.key)]);
     const other = subs.filter((s) => !known.has(notifKey(s)));
     const otherHtml = other.length && !f.value.startsWith('off') ? `<div class="alrt-shop"><div class="alrt-sh"><b>Other notifications on your account</b></div>${other.map((s) => `<div class="alrt-row"><span class="alrt-name">${esc(String(s.subject).replace(/^Quinoa/, ''))}: ${esc(s.itemId ?? '')}</span>${sw(notifKey(s), on.has(notifKey(s)))}</div>`).join('')}</div>` : '';
-    list.innerHTML = groups + otherHtml || '<div class="muted">No items match.</div>';
+    list.innerHTML = extrasHtml + groups + otherHtml || '<div class="muted">No items match.</div>';
   };
   const parseKey = (key) => { const i = key.indexOf(':'); return { subject: key.slice(0, i), itemId: key.slice(i + 1) }; };
   // one change at a time, in order
