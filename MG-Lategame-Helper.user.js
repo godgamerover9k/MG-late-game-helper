@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.18.8
+// @version      0.19.0
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.18.8';
+const MOD_VERSION = '0.19.0';
 const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
@@ -1345,6 +1345,8 @@ const DEFAULT_SETTINGS = {
   remoteName: null, // name shown on phones for this PC (optional)
   remotePcId: null, // a random id for this PC, kept across new codes, so a phone can tell two codes of the same PC apart
   featRareAlert: true, // 🔔 alert when a rare item is in a shop
+  featGameNotifs: true, // 📱 a screen for the game's own restock notifications (what the Magic Garden phone app sends)
+  alertsToPhoneApp: true, // changing an item's alert (🔔/🔁 vs 🔕) also switches its phone-app notification on/off
   rareAlertMin: 'Divine', // lowest rarity that alerts: Mythic / Divine / Celestial
   rareAlertSound: true, // chime with the alert
   rareAlertEvery: '15', // seconds between repeats
@@ -1406,7 +1408,7 @@ if (Array.isArray(settings.ignored) && !settings.seedFinderMigrated) {
   settings.ignored = [...new Set([...settings.ignored, 'SeedFinderI'])];
   settings.seedFinderMigrated = true; store.set('settings', settings);
 }
-const saveSettings = () => { store.set('settings', settings); try { applyKeepAwake(); } catch {} }; // (keep-awake follows its switch)
+const saveSettings = () => { store.set('settings', settings); try { applyKeepAwake(); } catch {} try { alertsPhoneSync(); } catch {} }; // (keep-awake follows its switch; alert changes reach the phone app)
 
 const allAbilities = () => Object.keys(A_TABLE);
 // In-game ability names (mg-api.ariedam.fr /data/abilities); anything unknown is spelled out from its id
@@ -3000,6 +3002,7 @@ function renderSettings(bar, body) {
       <div class="muted">${settings.pinned.length} pet(s) pinned with "Keep" (unpin on the Kept anyway tab).</div></details>
     <details data-sec="features"${secOpen('features')}><summary><b>Features</b></summary>
       ${chk('featBuyAll', '🛒 Buy everything')}
+      ${chk('featGameNotifs', "📱 Game notifications screen (the phone app's restock notifications), and switching them with your alerts")}
       ${chk('featLevelUp', '📈 Level up preset (Teams tab)')}
       ${chk('featEggPlan', '📖 Which team for each egg (Teams tab)')}
       ${chk('keepAwake', '💤 Keep the game running in the background (unfocused or hidden tab)')}${settings.keepAwake !== false && keepAwake.othersHandleIt() ? ' <span class="muted">(another mod is already doing this, so this one stays off)</span>' : ''}
@@ -3035,8 +3038,10 @@ function renderSettings(bar, body) {
     <details data-sec="shop"${secOpen('shop')}><summary><b>🛒 Shop</b></summary>
       ${chk('buyPotions', 'Also buy XP and Hunger potions (Magic Dust)')}
       ${chk('featRareAlert', '🔔 Alert when a rare item is in stock')}
+      ${settings.featGameNotifs !== false ? `<div><button data-a="gamenotifs" title="The game's own restock notifications, sent by the Magic Garden phone app: every item of every shop, open or not">📱 Game notifications (phone app)…</button></div>
+      ${chk('alertsToPhoneApp', "When I change an item's alert, also switch its phone-app notification (🔔/🔁 on, 🔕 off)")}` : ''}
       <div><button data-a="buymenu">🛒 Choose what Buy everything buys…</button> <span class="muted">${esc(buySummary())}</span></div>
-      <div><button data-a="alertmenu">🔔 Choose alerts for each item…</button> <span class="muted">${esc(alertSummary())}</span></div>
+      <div><button data-a="alertmenu">🔔 Choose alerts for each item…</button> <button class="mini" data-a="ariesimport" title="Copy the shop alerts you follow in Arie's Mod (in this browser): loop → repeating, one-shot → once, volume 0 → off">Import from Arie's Mod…</button> <span class="muted">${esc(alertSummary())}</span></div>
       ${sel('rareAlertMin', 'Items you haven\'t set: alert once if at least', [['Mythic', 'Mythic'], ['Divine', 'Divine'], ['Celestial', 'Celestial'], ['none', 'never (only items you set)']])}
       ${sel('rareAlertEvery', '🔁 Repeating alerts ring every', [['10', '10 s'], ['15', '15 s'], ['30', '30 s'], ['60', '1 min']])} <span class="muted">until bought or stopped; only these go to your phone (📱 Phone remote)</span>
       ${chk('rareAlertSound', 'Chime')} <label>volume <input type="range" min="0" max="100" step="5" data-f="rareAlertVolume" value="${Number(settings.rareAlertVolume ?? 60)}" style="width:110px"></label> <button class="mini" data-a="chimetest">▶ Test</button> ${chk('rareAlertDesktop', 'System notification (works with the tab in the background)')}
@@ -3148,7 +3153,9 @@ function onClick(e) {
   if (a === 'remotesharecopy' && REMOTE_POOLS) { const link = remoteShareLink(); if (!link) return; try { navigator.clipboard.writeText(link); toast('Buy-only link copied: whoever opens it can press Buy on this PC while sharing is on, and see what\'s to buy here.', { key: 'remote', ms: 7000 }); } catch { prompt('Buy-only link:', link); } return; }
   if (a === 'remotecopy') { const link = remotePageLink(); try { navigator.clipboard.writeText(link); toast('Phone link copied: open it on your phone (send it to yourself, or type it in).', { key: 'remote', ms: 6000 }); } catch { prompt('Phone link:', link); } return; }
   if (a === 'alertmenu') { openAlertMenu(); return; }
+  if (a === 'ariesimport') { importAriesAlerts(() => render()); return; }
   if (a === 'buymenu') { openBuyMenu(); return; }
+  if (a === 'gamenotifs') { openGameNotifs(); return; }
   if (a === 'reset') { settings = { ...DEFAULT_SETTINGS, pinned: settings.pinned, gardenOwner: settings.gardenOwner }; saveSettings(); analyze(); render(); }
   if (a === 'copy') copyReport(b);
   if (a === 'refreshdata') { b.textContent = 'Refreshing…'; loadLiveData(true); }
@@ -3712,6 +3719,53 @@ const rarityTag = (r) => !r ? '' : r === 'Celestial'
   : ` <span class="rar" style="color:${RARITY_COLOR[r] ?? '#9a9da5'}">${esc(r)}</span>`;
 const ALERT_ICON = { off: '🔕', once: '🔔', repeat: '🔁' };
 const ALERT_WORD = { off: 'No alert', once: 'Alert once per restock', repeat: 'Alert again until bought (and on your phone)' };
+// Arie's Mod's shop alerts, read from its settings in this browser (localStorage "aries_mod", same page): the items it
+// follows (notifier.prefs, "Seed:Carrot": 1), each item's sound rule (notifier.rules: playbackMode "oneshot" / "loop",
+// volume 0..1) and the shop defaults (audio.settings: contexts.shops.mode / volume, else the older top-level ones;
+// Arie's defaults are one-shot at 0.7). Followed + loop → 🔁, followed + one-shot → 🔔, volume 0 or not followed → 🔕.
+function readAriesAlerts() {
+  let blob = null;
+  try { blob = JSON.parse(W.localStorage.getItem('aries_mod') || 'null'); } catch {}
+  if (!blob || typeof blob !== 'object') return null;
+  const prefs = blob.notifier?.prefs, rules = blob.notifier?.rules ?? {}, audio = blob.audio?.settings ?? {};
+  if (!prefs || typeof prefs !== 'object') return { modes: {}, followed: 0, muted: 0, volume: null };
+  const shops = audio.contexts?.shops ?? {};
+  const pick = (k, ok) => (ok(shops[k]) ? shops[k] : ok(audio[k]) ? audio[k] : undefined);
+  const defMode = pick('mode', (v) => v === 'loop' || v === 'oneshot') ?? 'oneshot';
+  const defVol = pick('volume', (v) => Number.isFinite(v)) ?? 0.7;
+  const modes = {};
+  let followed = 0, muted = 0;
+  for (const [key, bits] of Object.entries(prefs)) {
+    const m = /^(Seed|Egg|Tool|Decor):(.+)$/.exec(key);
+    if (!m || !((Number(bits) | 0) & 1)) continue; // weather alerts and unfollowed items: skipped
+    followed++;
+    const r = rules[key] && typeof rules[key] === 'object' ? rules[key] : {};
+    const vol = Number.isFinite(r.volume) ? r.volume : defVol;
+    const mode = r.playbackMode === 'loop' || r.playbackMode === 'oneshot' ? r.playbackMode : defMode;
+    if (!(vol > 0)) { modes[m[2]] = 'off'; muted++; continue; }
+    modes[m[2]] = mode === 'loop' ? 'repeat' : 'once';
+  }
+  return { modes, followed, muted, volume: defVol };
+}
+function importAriesAlerts(after) {
+  const a = readAriesAlerts();
+  if (!a) { alert("Arie's Mod settings weren't found in this browser. Open the game once with Arie's Mod installed, then try again."); return; }
+  if (!a.followed) { alert("Arie's Mod doesn't follow any shop items here, so there's nothing to import."); return; }
+  const v = Object.values(a.modes), n = (x) => v.filter((y) => y === x).length;
+  const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">Import alerts from Arie's Mod</b></div>
+    <div>${a.followed} followed item${a.followed === 1 ? '' : 's'}: <b>${n('once')}</b> 🔔 once · <b>${n('repeat')}</b> 🔁 repeating${a.muted ? ` · <b>${a.muted}</b> 🔕 off (volume 0)` : ''}</div>
+    <div class="muted">Loop → 🔁 repeating, one-shot → 🔔 once, volume 0 → 🔕 off. Weather alerts aren't imported.</div>
+    <div class="acts"><button data-m="replace" title="Your choices become exactly Arie's: items it doesn't follow won't alert">Replace mine</button><button data-m="add" title="Only the items Arie's follows change; everything else stays as you set it">Add to mine</button><button data-m="cancel">Cancel</button></div>`);
+  m.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-m]'); if (!b && e.target !== m) return;
+    const how = b?.dataset.m;
+    if (how === 'replace') { settings.rareAlertModes = { ...a.modes }; settings.rareAlertMin = 'none'; }
+    else if (how === 'add') settings.rareAlertModes = { ...(settings.rareAlertModes ?? {}), ...a.modes };
+    m.remove();
+    if (how === 'replace' || how === 'add') { saveSettings(); toast(`Imported ${a.followed} alert${a.followed === 1 ? '' : 's'} from Arie's Mod.`, { key: 'aries', ms: 5000 }); }
+    try { after?.(); } catch {}
+  });
+}
 function setAlertMode(id, mode) {
   settings.rareAlertModes = { ...(settings.rareAlertModes ?? {}), [id]: mode };
   saveSettings();
@@ -3719,7 +3773,7 @@ function setAlertMode(id, mode) {
 function alertSummary() {
   const v = Object.values(settings.rareAlertModes ?? {});
   const n = (m) => v.filter((x) => x === m).length;
-  return `${n('once')} once · ${n('repeat')} repeating · ${n('off')} off; the rest follow the rarity default`;
+  return `${n('once')} once · ${n('repeat')} repeating · ${n('off')} off; ${!settings.rareAlertMin || settings.rareAlertMin === 'none' ? 'no alert for the rest' : `the rest: once if ${settings.rareAlertMin} or rarer`}`;
 }
 // The Shop tab's little switch for an item (click cycles off → once → repeat)
 const alertBell = (i) => { const m = alertMode(i), set = (settings.rareAlertModes ?? {})[i.id] != null;
@@ -3731,7 +3785,7 @@ function openAlertMenu() {
     <div class="muted">🔕 no alert · 🔔 once per restock · 🔁 again every ${esc(settings.rareAlertEvery || 15)} s until bought, and on your phone. Items you haven't set (shown faded) follow the rarity default in Settings.</div>
     <div class="alrt-tools"><input type="search" class="alrt-q" placeholder="Search items…"><select class="alrt-f"><option value="all">All items</option><option value="on">Alerting</option><option value="repeat">Repeating</option><option value="set">Set by you</option></select></div>
     <div class="alrt-list"></div>
-    <div class="acts"><button data-m="reset" title="Forget every choice: all items follow the rarity default">Reset all</button><button data-m="close">Close</button></div>`);
+    <div class="acts"><button data-m="aries" title="Copy the shop alerts you follow in Arie's Mod (in this browser)">Import from Arie's Mod…</button><button data-m="reset" title="Forget every choice: all items follow the rarity default">Reset all</button><button data-m="close">Close</button></div>`);
   m.classList.add('alertdlg');
   const list = m.querySelector('.alrt-list'), q = m.querySelector('.alrt-q'), f = m.querySelector('.alrt-f');
   const seg = (i) => { const cur = alertMode(i), set = (settings.rareAlertModes ?? {})[i.id] != null;
@@ -3762,6 +3816,7 @@ function openAlertMenu() {
       settings.rareAlertModes = modes; saveSettings(); draw(); return;
     }
     if (b.dataset.m === 'reset') { if (confirm('Forget all your alert choices? Every item goes back to the rarity default.')) { settings.rareAlertModes = {}; saveSettings(); draw(); } return; }
+    if (b.dataset.m === 'aries') { m.remove(); importAriesAlerts(() => openAlertMenu()); return; }
     if (b.dataset.m === 'close') { m.remove(); render(); }
   });
   m.addEventListener('keydown', (e) => { if (e.key === 'Escape') { m.remove(); render(); } });
@@ -3823,6 +3878,171 @@ function openBuyMenu() {
   draw();
   q.focus();
 }
+// ---------- 📱 The game's own restock notifications (what the Magic Garden phone app sends) ----------
+// They're saved on your account on the game's server: the app shows and changes the same list. The game reads it from
+// …/version/<n>/api/rooms/<ROOM>/notifications/subscriptions and changes it with POST …/notifications/subscribe or
+// …/unsubscribe and a body like { subject: 'QuinoaSeedInStock', itemId: 'Carrot' } (your browser's login is what says
+// it's you). This screen does the same, one change at a time, only when you press a switch. Nothing else is sent.
+const NOTIF_SUBJECT = { Seed: 'QuinoaSeedInStock', Egg: 'QuinoaEggInStock', Tool: 'QuinoaToolInStock', Decor: 'QuinoaDecorInStock' };
+const NOTIF_GROUP = { QuinoaSeedInStock: '🌱 Seeds', QuinoaEggInStock: '🥚 Eggs', QuinoaToolInStock: '🔧 Tools', QuinoaDecorInStock: '🪑 Decor' };
+const notifKey = (s) => `${s.subject}:${s.itemId}`;
+function notifBase() {
+  // the game connection's own address: wss://magicgarden.gg/version/1714/api/rooms/ROOM/connect?…
+  const fromWs = (u) => { const m = /^wss?:\/\/([^/]+)(\/version\/\d+)?\/api\/rooms\/([^/?#]+)/.exec(String(u || '')); return m ? `https://${m[1]}${m[2] || ''}/api/rooms/${m[3]}` : null; };
+  let b = null;
+  try { b = fromWs(net.socketNow?.()?.url) || fromWs(W.MagicCircle_RoomConnection?.currentWebSocket?.url); } catch {}
+  if (b) return b;
+  const seen = performance.getEntriesByType('resource').map((e) => e.name).find((u) => /\/api\/rooms\/[^/]+\/notifications\//.test(u));
+  return seen ? seen.replace(/\/notifications\/.*$/, '') : null;
+}
+async function notifRequest(path, body, method) {
+  const base = notifBase();
+  if (!base) throw new Error('not in a game room');
+  const doFetch = typeof W.fetch === 'function' ? W.fetch.bind(W) : fetch;
+  const r = await doFetch(base + path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : method ? { method } : {});
+  if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch {} throw new Error(`HTTP ${r.status}${t ? ': ' + t : ''}`); }
+  try { return await r.json(); } catch { return null; }
+}
+// every item of every shop in the game data (open now or not), with the shops that sell it
+function notifCatalog() {
+  const out = [];
+  const sources = [['plants', 'Seed'], ['eggs', 'Egg'], ['items', 'Tool'], ['decors', 'Decor']];
+  for (const [kind, itemType] of sources) {
+    for (const [id, d] of Object.entries(unwrapLive(liveData?.[kind]) ?? {})) {
+      const shops = (d?.seed?.eligibleShops ?? d?.eligibleShops ?? []).map((x) => String(x).toLowerCase());
+      if (!shops.length) continue; // never sold in a shop
+      out.push({ itemType, id, name: d?.seed?.name ?? d?.name ?? id, subject: NOTIF_SUBJECT[itemType], shops,
+        // the game only offers notifications for items sold somewhere other than the Spooky shop
+        offered: shops.some((x) => x !== 'spooky') });
+    }
+  }
+  return out;
+}
+async function openGameNotifs() {
+  const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">📱 Game notifications</b><span class="muted gn-sum">loading…</span></div>
+    <div class="muted">The game's own restock notifications, the ones the Magic Garden phone app sends. They're saved on your account, so the app follows what you set here (it may show it after reopening). Every item of every shop is listed, open now or not.</div>
+    <div class="alrt-tools"><input type="search" class="alrt-q" placeholder="Search items…"><select class="alrt-f"><option value="all">All items</option><option value="on">Notifying</option><option value="off">Not notifying</option></select><select class="gn-shop"></select></div>
+    <div class="alrt-list"></div>
+    <div class="muted gn-st" style="min-height:18px"></div>
+    <div class="acts"><button data-m="alloff" title="Switch off every notification on your account (the game's own 'delete all')">Turn all off…</button><button data-m="close">Close</button></div>`);
+  m.classList.add('alertdlg');
+  const list = m.querySelector('.alrt-list'), q = m.querySelector('.alrt-q'), f = m.querySelector('.alrt-f'), shopSel = m.querySelector('.gn-shop'), st = m.querySelector('.gn-st');
+  const cat = notifCatalog();
+  let subs = null, busyN = 0, err = '';
+  const on = new Set();
+  const shopsAll = [...new Set(cat.flatMap((i) => i.shops))].sort((a, b) => (SHOP_NAMES[a] ? 0 : 1) - (SHOP_NAMES[b] ? 0 : 1) || a.localeCompare(b));
+  shopSel.innerHTML = `<option value="">All shops</option>${shopsAll.map((k) => `<option value="${esc(k)}">${esc(shopLabel(k))}</option>`).join('')}`;
+  const status = () => { m.querySelector('.gn-sum').textContent = subs ? `${on.size} notifying` : 'loading…'; st.textContent = busyN ? `Saving… ${busyN} left` : err; };
+  const match = (i) => { const needle = q.value.trim().toLowerCase(); return (!needle || String(pretty(i.name)).toLowerCase().includes(needle) || String(i.id).toLowerCase().includes(needle)) && (!shopSel.value || i.shops.includes(shopSel.value))
+    && (f.value === 'all' || (f.value === 'on') === on.has(notifKey({ subject: i.subject, itemId: i.id }))); };
+  const shopTags = (i) => i.shops.filter((x) => !['seed', 'egg', 'tool', 'decor'].includes(x)).map((x) => `<span class="muted">· ${esc(shopLabel(x))}</span>`).join(' ');
+  const sw = (key, isOn, offered = true) => (offered ? `<span class="alrt-seg"><button data-gk="${esc(key)}" data-on="1" class="${isOn ? 'on' : ''}" title="Notify me when it's in stock">🔔</button><button data-gk="${esc(key)}" data-on="0" class="${isOn ? '' : 'on'}" title="No notification">🔕</button></span>` : '<span class="muted" style="flex:0 0 auto" title="The game doesn\'t offer notifications for items only sold in the Spooky shop">not offered</span>');
+  const draw = () => {
+    status();
+    if (!subs) { list.innerHTML = `<div class="muted">${esc(err || 'Loading your notifications…')}</div>`; return; }
+    const groups = Object.entries(NOTIF_GROUP).map(([subject, title]) => {
+      const items = cat.filter((i) => i.subject === subject && match(i));
+      if (!items.length) return '';
+      items.sort((x, y) => (y.offered - x.offered) || rarityRank(itemRarity(y)) - rarityRank(itemRarity(x)) || String(pretty(x.name)).localeCompare(String(pretty(y.name))));
+      return `<div class="alrt-shop"><div class="alrt-sh"><b>${esc(title)}</b><span class="alrt-bulk muted">all listed: <button class="mini" data-gbulk="1" data-subject="${subject}" title="Notify for every item listed here">🔔</button><button class="mini" data-gbulk="0" data-subject="${subject}" title="No notification for every item listed here">🔕</button></span></div>
+        ${items.map((i) => { const key = notifKey({ subject: i.subject, itemId: i.id }); return `<div class="alrt-row"${i.offered ? '' : ' style="opacity:.55"'}>${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${rarityTag(itemRarity(i))} ${shopTags(i)}</span>${sw(key, on.has(key), i.offered)}</div>`; }).join('')}</div>`;
+    }).join('');
+    // anything else on your account: weather, day & night, daily quests, items not in the game data
+    const known = new Set(cat.map((i) => notifKey({ subject: i.subject, itemId: i.id })));
+    const other = subs.filter((s) => !known.has(notifKey(s)));
+    const otherHtml = other.length && !f.value.startsWith('off') ? `<div class="alrt-shop"><div class="alrt-sh"><b>Other notifications on your account</b></div>${other.map((s) => `<div class="alrt-row"><span class="alrt-name">${esc(String(s.subject).replace(/^Quinoa/, ''))}: ${esc(s.itemId ?? '')}</span>${sw(notifKey(s), on.has(notifKey(s)))}</div>`).join('')}</div>` : '';
+    list.innerHTML = groups + otherHtml || '<div class="muted">No items match.</div>';
+  };
+  const parseKey = (key) => { const i = key.indexOf(':'); return { subject: key.slice(0, i), itemId: key.slice(i + 1) }; };
+  // one change at a time, in order
+  let chain = Promise.resolve();
+  const step = async (k, wantOn) => {
+    try { await notifRequest(`/notifications/${wantOn ? 'subscribe' : 'unsubscribe'}`, parseKey(k)); if (wantOn) on.add(k); else on.delete(k); }
+    catch (e) { err = `Couldn't change ${parseKey(k).itemId}: ${e.message}`; }
+    busyN--; draw();
+    await sleep(120);
+  };
+  const change = (keys, wantOn) => {
+    const todo = keys.filter((k) => on.has(k) !== wantOn);
+    if (!todo.length) return;
+    busyN += todo.length; err = ''; status();
+    chain = todo.reduce((c, k) => c.then(() => step(k, wantOn)), chain);
+  };
+  const close = () => { m.remove(); render(); };
+  m.addEventListener('input', (e) => { if (e.target === q) draw(); });
+  m.addEventListener('change', (e) => { if (e.target === f || e.target === shopSel) draw(); });
+  m.addEventListener('click', (e) => {
+    if (e.target === m) { close(); return; }
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.gk) { change([b.dataset.gk], b.dataset.on === '1'); return; }
+    if (b.dataset.gbulk) {
+      const wantOn = b.dataset.gbulk === '1';
+      const keys = cat.filter((i) => i.subject === b.dataset.subject && i.offered && match(i)).map((i) => notifKey({ subject: i.subject, itemId: i.id })).filter((k) => on.has(k) !== wantOn);
+      if (!keys.length) return;
+      if (keys.length > 5 && !confirm(`${wantOn ? 'Turn on' : 'Turn off'} notifications for ${keys.length} items?`)) return;
+      change(keys, wantOn); return;
+    }
+    if (b.dataset.m === 'alloff') {
+      if (!on.size || !confirm(`Turn off all ${on.size} notifications on your account (also in the phone app)?`)) return;
+      chain = chain.then(async () => { try { await notifRequest('/notifications/unsubscribe-all', null, 'POST'); on.clear(); } catch (e2) { err = `Couldn't turn them all off: ${e2.message}`; } draw(); });
+      return;
+    }
+    if (b.dataset.m === 'close') close();
+  });
+  m.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  draw();
+  q.focus();
+  try {
+    const r = await notifRequest('/notifications/subscriptions');
+    subs = Array.isArray(r?.subscriptions) ? r.subscriptions.filter((s) => s && typeof s.subject === 'string') : [];
+    subs.forEach((s) => on.add(notifKey(s)));
+  } catch (e) { err = `Couldn't read your notifications: ${e.message}`; }
+  if (!cat.length && !err) err = "The game's item list hasn't loaded yet (it comes from mg-api.ariedam.fr); try again in a moment.";
+  draw();
+}
+// Alerts → phone app: when an item's alert changes in this mod (menu, Shop tab bell, Arie's import, reset, rarity
+// default), its game notification follows: 🔔/🔁 subscribe, 🔕 unsubscribe. Only items whose alert changed are touched,
+// so notifications you set by hand for other items stay as they are. (var: may be called while the mod starts up)
+var alertSyncPrev = null, alertSyncTimer = null, alertSyncBusy = false;
+const alertSyncOn = () => settings.featGameNotifs !== false && settings.alertsToPhoneApp !== false && settings.featRareAlert !== false;
+function alertEffectiveMap() {
+  const out = new Map();
+  for (const i of notifCatalog()) if (i.offered) out.set(notifKey({ subject: i.subject, itemId: i.id }), alertMode(i) !== 'off');
+  return out;
+}
+function alertsPhoneSync() {
+  if (!alertSyncOn()) { alertSyncPrev = null; return; }
+  clearTimeout(alertSyncTimer);
+  alertSyncTimer = setTimeout(() => { alertsPhoneSyncNow().catch((e) => console.error('[mglh] phone sync', e)); }, 1500);
+}
+async function alertsPhoneSyncNow() {
+  if (!alertSyncOn()) return;
+  if (alertSyncBusy) { alertsPhoneSync(); return; }
+  const now = alertEffectiveMap();
+  if (!now.size) return; // the game's item list isn't loaded yet
+  const prev = alertSyncPrev;
+  if (!prev) { alertSyncPrev = now; return; }
+  const changes = [...now].filter(([k, v]) => prev.has(k) && prev.get(k) !== v);
+  alertSyncPrev = now;
+  if (!changes.length) return;
+  if (!notifBase()) { toast("Phone-app notifications weren't changed: join a game room first.", { key: 'phonesync', ms: 6000 }); return; }
+  if (changes.length > 15 && !confirm(`Your alert change affects ${changes.length} items. Also switch their phone-app notifications (${changes.filter(([, v]) => v).length} on, ${changes.filter(([, v]) => !v).length} off)?`)) return;
+  alertSyncBusy = true;
+  let ok = 0, failed = '';
+  try {
+    for (const [key, wantOn] of changes) {
+      const i = key.indexOf(':');
+      try { await notifRequest(`/notifications/${wantOn ? 'subscribe' : 'unsubscribe'}`, { subject: key.slice(0, i), itemId: key.slice(i + 1) }); ok++; }
+      catch (e) { failed = failed || `${key.slice(i + 1)}: ${e.message}`; }
+      await sleep(120);
+    }
+  } finally { alertSyncBusy = false; }
+  const on = changes.filter(([, v]) => v).length, off = changes.length - on;
+  toast(`📱 Phone-app notifications: ${[on ? `${on} on` : '', off ? `${off} off` : ''].filter(Boolean).join(', ')}${failed ? ` (some failed, e.g. ${esc(failed)})` : ''}.`, { key: 'phonesync', ms: failed ? 10000 : 4000 });
+  if (!ok && failed) alertSyncPrev = null; // nothing went through: look again from scratch next time
+}
+// remember the starting point once the game's item list is in (changes after that are synced)
+setInterval(() => { if (alertSyncOn() && !alertSyncPrev && !alertSyncBusy) { const m = alertEffectiveMap(); if (m.size) alertSyncPrev = m; } }, 3000);
 let chimeCtx = null;
 function chime() {
   if (!(Number(settings.rareAlertVolume ?? 60) > 0)) return;

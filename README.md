@@ -55,7 +55,8 @@ The page is [remote.html](remote.html) in this repository, served by GitHub Page
 - **Journal:** pet and crop logging, crop filters by mutation, the missing variants shown above the plant you stand on, and seeds taken from the Seed Silo in one press.
 - **Mounts:** while riding a Thundercharger or Capture pet, shows how many crops it would charge or capsules it would make where you stand.
 - **Buy everything:** buys every shop's stock in one press per restock and puts purchases away in the Seed Silo, Tool Shack and Decor Shed. A menu lets you choose, for every item in the game, whether it's bought. Buildings, one-time items and Magic Dust items are never bought (XP and Hunger potions optional).
-- **Item alerts:** for every item, no alert, once per restock, or repeating until bought (repeating ones also reach your phone).
+- **Item alerts:** for every item, no alert, once per restock, or repeating until bought (repeating ones also reach your phone). Can be imported from Arie's Mod.
+- **Game notifications (phone app):** manage the game's own restock notifications for every item of every shop, open or not; changing an item's alert in the mod switches its phone-app notification too (can be turned off).
 - **📱 Phone page:** press Buy or Reconnect on your PC from your phone; several PCs on one page; Buy-only links for others.
 - **Other:**
   - joins a public room with 5 players in one press;

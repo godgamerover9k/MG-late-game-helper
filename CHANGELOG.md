@@ -1,5 +1,25 @@
 # MG Lategame Helper: changelog
 
+## 0.19.0
+- 📱 Game notifications (phone app): Settings → 🛒 Shop → "📱 Game notifications (phone app)…". This is a screen for the game's own restock notifications, the ones the Magic Garden phone app sends.
+  - They're saved on your account on the game's server, so the app follows what you set here. The app may show it after reopening.
+  - Every item of every shop is listed, whether the shop is open now or not (weather shops, the Spooky shop). For each item: 🔔 notify / 🔕 none, its picture and rarity, and the shops that sell it.
+  - Search, a filter (all / notifying / not notifying), a shop filter, "all listed" 🔔/🔕 per group (asks first for more than 5 items) and "Turn all off…". Other notifications on your account (weather, day & night, daily quests) are listed too, with their switches.
+  - Items sold only in the Spooky shop show "not offered": the game doesn't offer notifications for them.
+  - The mod reads and changes the list the same way the game does (…/api/rooms/<room>/notifications/subscriptions, POST …/notifications/subscribe or /unsubscribe with { subject, itemId }, POST …/notifications/unsubscribe-all), one change at a time and only when you press a switch.
+- 🔔 → 📱 "When I change an item's alert, also switch its phone-app notification" (on by default; Settings → 🛒 Shop).
+  - Setting an item to 🔔 or 🔁 in this mod turns its game notification on; 🔕 turns it off. This covers the alerts menu, the Shop tab's bells, the Arie's Mod import, Reset and the rarity default.
+  - Only items whose alert changed are touched, so notifications you set by hand for other items stay.
+  - It asks first when one change affects more than 15 items, and shows a short note of what changed.
+- Both can be switched off: the whole thing in Settings → Features ("📱 Game notifications screen"), the alert link with its own switch in Settings → 🛒 Shop.
+
+## 0.18.9
+- 🔔 Import alerts from Arie's Mod: "Import from Arie's Mod…" in Settings → 🛒 Shop (next to the alerts menu) and in the 🔔 Alerts menu.
+  - It reads Arie's Mod's settings in this browser: the shop items it follows, each item's sound rule and its shop defaults.
+  - Each followed item maps to: loop → 🔁 repeating, one-shot → 🔔 once, volume 0 → 🔕 off. Items without a rule use Arie's shop default (one-shot at 70% unless changed there). Weather alerts aren't imported.
+  - "Replace mine" makes your choices exactly Arie's: items it doesn't follow get no alert. "Add to mine" only changes the items Arie's follows.
+- The alerts summary says what happens to items you haven't set ("no alert for the rest", or "once if Divine or rarer").
+
 ## 0.18.8
 - Buying no longer stays blocked after the game's connection drops and comes back (e.g. after the tab sat in the background). The game opens a new connection, sometimes without the "Welcome" message the mod waited for, and the mod then said it wasn't connected and blocked Buy everything until the page was reloaded.
   - The mod now follows the new connection by the numbers the game shows on it: the last command the server executed (in every room frame) and the highest number sent on it. This works whether the game carries on with its numbering or starts again.
