@@ -1,5 +1,12 @@
 # MG Lategame Helper: changelog
 
+## 0.19.3
+- 🛒 The Buy window can be closed while buying (Close, which reads "Hide (keeps buying)" then, Esc, or a click outside it). The buy goes on, and a note in the corner shows "Buying in the background…" with its progress, then the result. Pressing 🛒 meanwhile says it's still buying instead of doing nothing.
+- The corner notes (rare item alerts and the like): their buttons ("🛒 Open Buy", "🔕 Stop") look like buttons again, and the content is lined up in the middle, so item pictures sit level with the text. The game page's own button styles no longer dim them. Notes are a little wider, so short alerts fit on one line.
+
+## 0.19.2
+- 📱 Game notifications: when the game has released a new version since the page loaded, its server refuses changes (HTTP 409 "VersionExpired"). The screen now says "the game was updated since this page loaded. Reload the page (F5), then try again" instead of the raw error. Changes made through alerts show the same.
+
 ## 0.19.1
 - 📱 Game notifications: the game's 🌙 Day & Night and 🌦️ Weather notifications are now on the screen too, at the top.
   - Day & Night: "Night falls" (sunset, when the Spooky shop opens), "Midnight", "The sun rises" (the game's QuinoaDayNightPhase: sunset / midnight / sunrise). The phone app only offers these at the weather station, and only until one is set.

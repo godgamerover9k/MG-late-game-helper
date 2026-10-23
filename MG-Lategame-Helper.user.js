@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.19.1
+// @version      0.19.3
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.19.1';
+const MOD_VERSION = '0.19.3';
 const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
@@ -1743,8 +1743,15 @@ const STYLE = `
 @keyframes mgpcPulse{0%,100%{box-shadow:0 4px 14px rgba(0,0,0,.4)}50%{box-shadow:0 0 0 4px rgba(231,76,60,.35),0 4px 14px rgba(0,0,0,.4)}}
 #mgpc-fab{position:fixed;left:14px;bottom:14px;z-index:2147483645;width:40px;height:40px;border-radius:50%;border:1px solid #474b55;background:#25282e;color:#fff;font-size:20px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4)}
 #mgpc-toasts{position:fixed;right:16px;bottom:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none}#mgpc-toasts .mgpc-toast{pointer-events:auto}
-.mgpc-toast{position:relative;max-width:360px;display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:12px;background:#24301f;border:1px solid #5bbf73;color:#e8e6e1;font:13px/1.45 system-ui,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.5)}
-.mgpc-toast button{background:none;border:none;color:#e8e6e1;cursor:pointer;font-size:14px}
+.mgpc-toast{position:relative;max-width:420px;display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:12px;background:#24301f;border:1px solid #5bbf73;color:#e8e6e1;font:13px/1.45 system-ui,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.mgpc-toast{align-items:center}
+.mgpc-toast>div:first-child{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;min-width:0}
+.mgpc-toast>div:first-child>*{vertical-align:middle}
+.mgpc-toast button{opacity:1;cursor:pointer;font:600 13px/1.2 system-ui,sans-serif;min-height:0;height:auto;margin:0;text-transform:none;letter-spacing:normal}
+.mgpc-toast>div:first-child button{background:#2f6b3a;border:1px solid #5bbf73;border-radius:8px;padding:5px 10px;color:#fff;white-space:nowrap}
+.mgpc-toast>div:first-child button:hover{background:#3b8248}
+.mgpc-toast>button[title="Close"]{align-self:flex-start;background:none;border:none;padding:0 2px;color:#a9b3a6;font-size:15px}
+.mgpc-toast>button[title="Close"]:hover{color:#fff}
 #mgpc-modal .buylist{max-height:46vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
 #mgpc-modal.shopdlg .card{overflow:hidden}
 #mgpc-modal.shopdlg .card > *{flex:none}
@@ -3467,6 +3474,7 @@ function collectShopBuy() {
 }
 async function startShopBuy() {
   if (settings.featBuyAll === false) return;
+  if (shopBusy && !shopDialogOpen) { if (!document.querySelector('.mgpc-toast[data-key="buyrun"]')) toast('<b>🛒 Still buying…</b> the result shows here when it\'s done.', { key: 'buyrun', ms: 8000 }); return; }
   if (shopBusy || shopDialogOpen) return;
   const collect = collectShopBuy;
   const shortHtml = (short) => {
@@ -3515,8 +3523,16 @@ async function startShopBuy() {
   };
   const tick = setInterval(update, 1000);
   setTimeout(update, 0); setTimeout(update, 320);
-  const close = () => { clearInterval(tick); shopDialogOpen = false; m.remove(); };
-  m.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !buying) close(); });
+  // Closing while buying only hides the window: the buy goes on, and a note shows its progress, then the result
+  let bgNote = null, bgMirror = null;
+  const close = () => {
+    clearInterval(tick); shopDialogOpen = false; m.remove();
+    if (buying && !bgNote) {
+      bgNote = toast('<b>🛒 Buying in the background…</b> <span class="bgst"></span>', { key: 'buyrun', ms: 10 * 60000 });
+      bgMirror = setInterval(() => { const x = bgNote?.querySelector('.bgst'); if (x) x.textContent = st.textContent; }, 500);
+    }
+  };
+  m.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
   // The potions toggle (same setting as in Settings): redraws the list straight away
   m.querySelector('.buypotions').addEventListener('change', (e) => {
     settings.buyPotions = e.target.checked; saveSettings();
@@ -3525,7 +3541,7 @@ async function startShopBuy() {
     updateShopFab();
   });
   m.addEventListener('click', async (e) => {
-    if (e.target === m && !buying) return close();
+    if (e.target === m) return close();
     const tile = e.target.closest('[data-buyoff]');
     if (tile && !buying && (e.isTrusted || TEST_BUILD)) {
       const k = tile.dataset.buyoff, offList = settings.buyOff ?? [];
@@ -3534,7 +3550,7 @@ async function startShopBuy() {
       return;
     }
     const b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.m === 'cancel' && !buying) return close();
+    if (b.dataset.m === 'cancel') return close();
     if (b.dataset.m === 'putaway' && !buying && (e.isTrusted || TEST_BUILD)) {
       b.disabled = true; b.textContent = 'Putting away…';
       const r = await putAwayLeftovers(); await sleep(300);
@@ -3545,9 +3561,14 @@ async function startShopBuy() {
     // Buy what's in stock at the moment you press Buy
     now = collect();
     if (!now.items.length) { refresh('Nothing to buy right now.'); return; }
-    buying = true; go.disabled = true; m.querySelector('[data-m="cancel"]').disabled = true; paint();
+    buying = true; go.disabled = true; m.querySelector('[data-m="cancel"]').textContent = 'Hide (keeps buying)'; paint();
     const result = await runShopBuy(now.items, st);
-    buying = false; m.querySelector('[data-m="cancel"]').disabled = false;
+    buying = false; m.querySelector('[data-m="cancel"]').textContent = 'Close';
+    if (!document.body.contains(m)) { // the window was closed meanwhile: the result goes in the note
+      clearInterval(bgMirror);
+      toast(`<b>🛒 ${esc(lastBuyResult?.text || 'Done.')}</b>`, { key: 'buyrun', ms: 20000 });
+      return;
+    }
     now = collect(); armedAt = Date.now() + 600;
     area.innerHTML = listHtml(now);
     st.innerHTML = result;
@@ -3900,7 +3921,12 @@ async function notifRequest(path, body, method) {
   if (!base) throw new Error('not in a game room');
   const doFetch = typeof W.fetch === 'function' ? W.fetch.bind(W) : fetch;
   const r = await doFetch(base + path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : method ? { method } : {});
-  if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch {} throw new Error(`HTTP ${r.status}${t ? ': ' + t : ''}`); }
+  if (!r.ok) {
+    let t = ''; try { t = (await r.text()).slice(0, 160); } catch {}
+    // the game released a new version since this page loaded: the server only takes requests from the new one
+    if (r.status === 409 && (r.headers?.get?.('X-MagicCircle-Error-Code') === 'VersionExpired' || /VersionExpired/.test(t))) throw new Error('the game was updated since this page loaded. Reload the page (F5), then try again');
+    throw new Error(`HTTP ${r.status}${t ? ': ' + t : ''}`);
+  }
   try { return await r.json(); } catch { return null; }
 }
 // every item of every shop in the game data (open now or not), with the shops that sell it
