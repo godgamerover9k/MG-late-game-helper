@@ -1,0 +1,9 @@
+# Buy-only links for the MG Buy phone page (its "Add everyone from the shared list" button).
+# One link per line; a name or anything else after the link is fine. This file is public, so only Buy-only links
+# (…#mglhs-…) go here, never a phone link (…#mglh-…); the page ignores those anyway.
+# Lines starting with # are skipped: put # in front of a link to take it off the list.
+https://godgamerover9k.github.io/MG-late-game-helper/remote.html#mglhs-f4ij9i4694rjgkr5fat2
+https://godgamerover9k.github.io/MG-late-game-helper/remote.html#mglhs-4wctrsx7m4pys83y245z
+https://godgamerover9k.github.io/MG-late-game-helper/remote.html#mglhs-dxj5tdhunv23jnr25yg5
+https://godgamerover9k.github.io/MG-late-game-helper/remote.html#mglhs-93dj2es85zrc2bkn6ckc
+https://godgamerover9k.github.io/MG-late-game-helper/remote.html#mglhs-sys2scvw82tjynri4xa6

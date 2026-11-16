@@ -1,5 +1,121 @@
 # MG Lategame Helper: changelog
 
+## 0.24.0
+- ⬆ Update check: a few seconds after the game loads and every 6 hours, the mod reads the version line of the public file on its GitHub page (raw.githubusercontent.com/godgamerover9k/MG-late-game-helper, the file Tampermonkey updates from; only its first 2 KB). When that version is newer, 🐾 gets a red dot and the panel's title bar a "⬆ vX.Y.Z" link. Its hover text lists what's new (the newer versions' sections of CHANGELOG.md on GitHub); clicking it opens the file, so Tampermonkey offers to update. The mod installs nothing itself and sends nothing about you or the game.
+  - Settings → Features → "⬆ Tell me when there's a new version": switch it off, or "Check now" (says whether you're up to date, or that the file couldn't be read).
+  - Nothing shows while GitHub can't be reached or has the same or an older version. A test build (e.g. 0.24.0-test14) counts as coming before its release (0.24.0-test14 < 0.24.0 < 0.24.1), the order Tampermonkey uses.
+- 📱 Phone page: item pictures show again ("Item pictures"). The game data's picture addresses end in a version tag ("…/Carrot.png?v=1847"), which the phone page doesn't accept, so no picture showed; the PC now sends the plain path.
+- 🧰 Tool Pouch (game version 1887): the pouch keeps up to 5 pins (Watering Can, a seed, …); the pinned items stay in your bag, and a pinned stack doesn't use one of the bag's 100 slots (the game's own count, read from its code).
+  - Buying counts free slots the same way, so it no longer leaves items out for "no free inventory slot" when the game still has room.
+  - A stack pinned in the pouch stays in your bag after buying instead of going into the Seed Silo / Tool Shack / Decor Shed ("it's in your Tool Pouch, so it stays with you"), and "📦 Put away" leaves it alone too.
+  - Camera (Log buttons), Strength Crystal and carry limits: nothing changes, since pinned items stay in the bag, where the mod reads them.
+  - Buy everything with a full bag: if the pouch has empty slots, it first pins stacks that stay in the bag anyway, which frees their bag slots for the new items. Those are eggs, or seeds / tools / decor whose storage you don't have or that can't take them; never pets, crops or potted plants. Kinds being bought come first, then the biggest stacks.
+    - It only pins when the bag is short of slots, and only as many stacks as needed. Only empty slots are used, one at a time, each checked in the game before the next; your own pins are never replaced or moved.
+    - The Buy window says which stacks will go into the pouch before you press Buy ("🧰 Your bag is full: to make room, …"), and the result says what was pinned.
+    - Pins the game no longer counts (a pet you don't have any more, the same pin twice) don't take up a slot, as in the game. No pouch in the game state: nothing is pinned.
+    - Switch: Settings → Shop → 🧰 Bag full: pin stacks … to empty Tool Pouch slots.
+- 🛒 Buying: once every free slot holds a new stack, items you already have a stack of are still bought. Before, they were left for the next press as "no free inventory slot".
+- 🌱 Crop journal "🌱 Get" button: Witchfire takes Foxfire Spores, like Foxfire (it grows in Foxfire Patches). It showed your Mushroom Spores, because the game data gives the Witchfire Spore the Mushroom Spore's picture. Where several shop seeds share a rare variant's seed picture, the one that grows as a patch is taken.
+- 🐾 Plant card hint: a 🐾 button shows which kinds of pet you have that eat the crop on the card (out in the garden, in your bag or the Pet Hutch; "(out)" when one is out, those first), then the other pets that eat it. From the game data's pet diets, matched exactly as the game does. Clicks on 🐾 stay with it and never reach the game. Off at first; the button or Settings → Features → 🐾 switches it.
+- 🐾 Useless tab: ticking a pet (or Tick all / Clear) no longer redraws the whole list, so the pictures don't blink; only the bar with the counts updates. Any other redraw of the panel keeps the pictures that were already showing instead of loading them again.
+- 🐾 Pet pictures: newer pets (Snow Fox, Fire Horse) showed their initials. The game data's own picture for each pet (pets/SnowFox.png) is now tried before the initials.
+- 🔍 Garden search:
+  - 📖 Journal now shows the plants whose crop still has journal entries missing (any variant not logged yet), whatever mutations are on them right now. Before, it showed only plants with a crop that would add an entry. A patch counts by the crops growing on it (a Daisy Patch growing Purple Daisies by the Purple Daisy journal), not by its own species. The count reads "5 plants · 2 crops to journal".
+  - A Filters button opens toggles, used together with the text box: Show 🌱 Plants / 🥚 Eggs / 🪑 Decor, and crops with any or all of Gold, Rainbow, Wet, Chilled, Frozen, Thunderstruck, Thundercharged, Dawnlit, Amberlit, Dawnbound, Amberbound, Max weight and No mutation. "All" means all of them on one crop, not spread over a plant's crops. The button shows how many toggles are on; "Clear toggles" turns them off.
+  - 🎯 Best spot (in Filters): 🌅 Dawn Capture, 🟠 Amber Capture or 🌩️ Thundercharger shows the tile to stand on, riding the pet, where pressing that ability gets the most. A box is drawn over the 3×3 the ability covers and a stronger one over its middle tile, labelled with the count. The rest of your garden fades, and the count reads "🎯 6 Dawn capsules".
+    - The boxes are drawn inside the game, in its world layer (with the game's own drawing classes): above the plants, under the game's cards, menus, windows and name labels. If those classes can't be found, they're drawn on the page instead.
+    - It counts the way the game's own code does: you must stand on one of your own garden's tiles (dirt or boardwalk), and the 3×3 around you is covered (your tile included). Only crops on dirt tiles count, and preserved crops don't. Dawnlit / Amberlit give 1 capsule, Dawnbound / Amberbound 2. Thundercharger counts Thunderstruck crops; one that also has Wet, Chilled, Frozen or Thundercharged isn't charged.
+    - When several tiles give the same, the one nearest to you is marked, and the line under the chips says how many there are. That line also gives what's in it ("2 Dawnlit + 2 Dawnbound crops"), what you'd get where you stand, and your pets out with that ability: ready, recharging (about how long), or hungry.
+    - It follows the garden as it changes, and the box follows the camera. When the spot is off screen, an arrow at the edge of the screen points the way instead. Any other toggle, typing, 📖 or pressing the chip again ends it; the other toggles are kept.
+    - Amber Capture never picks a spot that would take Amber off a tile of only rare crops: a Daisy Patch growing only Purple Daisies (likewise Four-Leaf Clover, Double Snowdrop, Variegated Cattail, Embercrown and Witchfire, the game's list of patch rare crops), or a rare crop planted on its own. The game takes Amber off every crop in the 3×3, so such a tile can't be left out of a spot; the spot is skipped instead. A patch that also has a common crop on it is counted like any other. The line says how many such tiles with Amber were kept, and where you stand it warns "takes Amber off Purple Daisy". Switch: Settings → Features → 🎯 Amber Capture: never pick a spot that takes Amber off a tile of only rare crops.
+    - Riding a pet with one of these abilities marks its best spot by itself, without opening 🔍, in that ability's colour (a pet with two of them gets two boxes). The label adds the time left while it recharges, or "hungry". Nothing is faded. Switch: Settings → Features → 🎯 Riding a Dawn Capture / Amber Capture / Thundercharger pet.
+    - Read-only: it never moves you or presses anything. Switch for the Filters row: Settings → Features → 🎯 …and Best spot in its Filters.
+- 🧼 Cleanse all of this kind, like QPM's Super Cleanser. Hold a Crop Cleanser on one of your plants and a small bar just above the game's plant card (above the plant hint, when that shows) offers to cleanse several of its crops at once, e.g. "🧼 5 crops like this one (Frozen + Wet)", button "Cleanse 3".
+  - Which crops: by default the ones like the crop on the game's card (exactly its weather mutations; ‹ › on the card picks another). Or, under "Pick ▾", pick mutations as in the garden search's Filters: crops with any / all of the picked ones. The chips are the mutations on this plant's crops that could be cleansed, Gold and Rainbow included to narrow it down (they're never removed). "Like the card's crop" goes back. The pick stays while the page is open; changing it takes back a "Sure?".
+  - Two clicks: the first only shows how many and how many Crop Cleansers it uses ("Sure? Cleanse 3"); after 5 seconds it goes back.
+  - It sends the game's own Crop Cleanser command, one crop at a time, each answered before the next, and re-checks each crop just before (still holding the cleanser, still on that plant, still the same kind, not preserved). It uses one Crop Cleanser per crop and never more than you have.
+  - A Crop Cleanser removes weather mutations only (Wet, Chilled, Frozen, Thunderstruck, Thundercharged, Dawnlit, Amberlit, Dawnbound, Amberbound: the game's list); Gold and Rainbow stay.
+  - Left out, and said: preserved crops; crops whose weather mutation isn't in your journal yet (the game asks "Cleanse anyway" for those; here they're simply not touched, and nothing is cleansed if the journal can't be read); a multi-harvest plant that isn't fully grown.
+  - Nothing happens unless you're holding the Crop Cleanser yourself; the mod never picks it up for you. With just one crop of that kind, the bar doesn't show (the game's own cleanse does that).
+  - Switch: Settings → Features → 🧼.
+- 🐎 Riding hint: moved from the top of the screen, where it covered the game's Shop / Garden / Sell buttons, to just under your character. It stays on screen, and goes back to the top only if your position can't be worked out.
+- 🛒 "Not connected" right after the game reconnects (e.g. after the tab was in the background): with another mod wrapping the game connection's send (Garden Companion does), the mod couldn't tell whether the new connection's sends pass through it until the game sent something, so buying was refused with "Reload the page" until you moved. Now:
+  - The Buy window (and a linked phone) checks it by resending where you stand, the same message the keep-awake ping sends. It only does this in that state, at most every 5 seconds, and nothing numbered is sent. Once it's seen, Buy is ready. If the sends really don't pass through the mod, buying stays blocked as before.
+  - If the old connection is still closing when a new one shows up, the new one is followed straight away.
+  - A Buy pressed on a phone right then (from a Buy-only link too) checks the new connection first, for up to 2 seconds, and then buys, instead of answering "can't buy right now". The phone's Reconnect does the same check and doesn't reload the page when that's enough. While the PC is unattended this matters most: nobody is there to move or reload.
+  - Each case now has its own message: "checking the new connection" (clears by itself), "connection closed, no new one yet", "waiting for the game to reconnect".
+  - `copy(__mglhNet())` in the F12 console now also shows the connections' state, for reporting.
+- 🌱 Plant card hint, 🐎 riding hint and 🎯 boxes: hidden while one of the game's windows or sheets is open over the garden (inventory, shops, journal, …; the game's own "window or overlay open" flag). Before, the plant card hint could stay on top of a game window.
+- 🐎 Riding hint (riding a Dawn Capture / Amber Capture / Thundercharger pet): it now counts the same way as 🎯 Best spot, which is the game's way. Preserved crops were counted before, and the game leaves them alone. Off your own garden it says "stand on your garden", since the game does nothing there. It adds the best spot's count ("· best spot: 6 (marked 🎯)"), or "· the best spot ✓" when you're on one. Where pressing it would take Amber off a tile of only rare crops, it warns ("⚠ takes Amber off Purple Daisy").
+- 🌱 Mutation pictures (the plant card hint "Not logged: …" and the garden search toggles): the game's mutation icons, as before. When one can't be loaded, the mutation's own picture from the game data is tried before the emoji (Thunderstruck showed as ⚡).
+- 📱 Phone page: a more compact layout: 6 PCs with things to buy take about 880 pixels of height (about one phone screen) instead of about 1,920.
+  - At the top, staying in view while you scroll: the next restock (shops restock on the 5-minute mark for everyone; the countdown is the game's own, from a connected PC) and the "Buy on all" bar, with how many items on how many PCs.
+  - One row per PC, in two groups: "Your PCs" and "Shared with you". Each row has a status dot (green connected, amber buying, red a problem, grey no word), the name, one status line and a "Buy 4" button. Item chips only show when there's something to buy.
+  - Reconnect only shows, in place of Buy, on your own PC whose game is disconnected. The ✕ buttons moved behind "Edit" (Remove, still asking first).
+  - Add everyone, Add a code and Share are three buttons at the bottom; "About this page" folds away the note on how the page works. A long last-buy result shows two lines; tap it for the rest.
+  - Two switches under the list, both off at first: "Hide PCs with nothing to buy" (including shared PCs not taking Buy from shared links) and "Hide PCs that are down" (offline, no word, game disconnected, old code, or no status 10 s after opening). Each group says how many are hidden ("Shared with you · 12 · 9 hidden"). Nothing is hidden while you edit, while the phone can't reach the relay servers, while a Buy is waiting for its answer or for a minute after it, and your own PC stays in view when it shows Reconnect.
+  - Nothing changed in what the page sends or accepts.
+- 📱 Phone page: "Add everyone" adds the Buy-only links listed in buy-links.txt, kept next to the page in the mod's GitHub repo (GitHub's raw copy if that can't be read).
+  - Only Buy-only codes (mglhs-…) are taken from it. The file is public, so a pairing code (mglh-…) in it is never added, and the page says so.
+  - Codes already on the phone, and the Buy-only code of a PC whose own code is already there, aren't added twice. PCs you removed from this phone aren't added back unless you press "Add … too".
+  - It only adds: a PC taken off the list stays on the phone until you remove it (Edit → Remove). Lines starting with # are skipped. At most 60 are taken.
+
+## 0.23.3
+- 📈 Level up: the XP Crystal's 10% now only counts on the pets' own XP (60 a minute while fed), not on XP Boost abilities. Players' tests show the crystal doesn't boost XP Boost pets (0.23.2 counted the whole rate). The note reads "XP Crystal: +10% on the pets' own XP (… left)". XP Potions stay unboosted.
+
+## 0.23.2
+- 📈 Level up counts the XP Crystal: while one is out, active pets gain XP 10% faster (the game's own text; its code multiplies the XP rate by 1.1 while any XP Crystal has time left). The XP/min line says "+10% from the XP Crystal (… left)", and the times to max level count the faster rate until the crystal runs out, then the normal rate. It's applied to the whole rate, XP Boost abilities included; whether the game's server boosts ability XP too isn't known. XP Potions aren't boosted: the game adds their 20,000 XP as is.
+
+## 0.23.1
+- Night now comes every 4 hours (the game's change of 2026-10-30), still 30 minutes from sunset to sunrise, with each midnight bringing the Dawn or Amber Moon:
+  - Nocturnal pets (Bat, Platypus, Red Fox and the Spooky egg's Moth, Snake and Toad, plus any species the game data marks nocturnal) get +15 STR at sunset, +20 at midnight and +10 at sunrise. Their long-term abilities now count that, averaged over the 4-hour cycle: a night is taken as 30 minutes at +15 STR, since the length of each phase isn't known. One-time abilities (hatching, selling) and the Teams tab still use the pet's strength without the night bonus.
+  - The Dawn and Amber Moon timing used for weather abilities stays as it was (a 10-minute lunar event every 4 hours).
+  - The closed Spooky shop says it opens at night every 4 hours (it said every 10 hours) until the Haunt Event ends.
+  - Game notifications: "Night falls" and "Midnight" hover texts say night comes every 4 hours and that midnight brings the Dawn or Amber Moon.
+- After the Haunt Event ends (2026-11-10 00:00 UTC) the closed Spooky shop is no longer shown in the Shop tab or the Buy menu, and items only sold there leave the 🔔 Alerts menu and the 📱 Game notifications screen (the night notifications stay, as "🌙 Night"). If the game opens the shop again, it's shown again.
+
+## 0.23.0
+- Works alongside Garden Companion (checked against its source, v0.9.87):
+  - With Garden Companion loaded after this mod, buying, selling and every other command were blocked ("Not connected to the game right now … Reload the page"): Garden Companion wraps the game connection's send over this mod's, which this mod took for a connection it couldn't watch. It now checks that commands still pass through it.
+  - With Garden Companion loaded first, this mod replaced Garden Companion's own send on the game connection, so its Crop Protection only held back harvests sent through the game's usual route. Its send is now kept and called.
+  - Garden Companion numbers every command itself; this mod no longer renumbers commands when it's there, so Garden Companion still sees the game's own numbers and keeps the game's predicted moves in step.
+  - Shown as "Working alongside Garden Companion" (it was taken for QPM, as both wrap the same game function).
+  - Putting bought items away: a stack Garden Companion's auto-store put away first counts as put away instead of being reported as refused or "storage full".
+  - 🔍 Garden search waits while Garden Companion's plant focus is on (both fade plants, which made them flicker), and only puts back the see-through level it set itself.
+  - The missing journal entries row above the plant card moves above Garden Companion's crop/egg rows when those are drawn on the page.
+  - Keep awake: when another mod already keeps the page "visible" (Garden Companion's background mode does), this mod still sends the 60-second position ping.
+- 💎 Strength Crystal left out: when it has been out for 10 minutes (setting) without hatching or selling pets, a note says so, with its time left, and offers "Pick it up" (the game's own pick-up; it keeps its time), "Keep it out" (asks again after another 10 minutes) and "Don't warn again". Hatching or selling restarts the count. Settings → Features.
+- 🧪 Teams tab, more compact: the explanation of each team moved into the title's hover text (ⓘ), one line per pet with what it adds, ability badges only when a team mixes abilities, smaller buttons, more cards per row, and a green edge on teams that are out now. Same for Level up and the egg plan.
+- 🧬 The Gold / Rainbow hatching team's icon is now 🧬 (🌈 is the Rainbow crops team's).
+
+## 0.22.0
+- Teams tab: two new teams, 🟡 Gold crops and 🌈 Rainbow crops. Each is the 3 pets with the strongest Gold Granter / Rainbow Granter (every Gold / Rainbow pet has one). Each pet has its own chance every minute to give a crop in your garden the mutation (0.72% at STR 100, scaling with STR), so the chances add up. The card shows the expected crops per hour and the chance per minute.
+  - These teams stay out for hours, so they're counted without the Strength Crystal's +10 even when the crystal setting is on.
+  - Like every best team, their pets aren't listed as useless, and Level up grows pets these teams would use once fully grown (each can be switched off in Level up's goal list).
+  - Can be switched off: Settings → Features → 🟡 Gold crops and 🌈 Rainbow crops teams.
+
+## 0.21.0
+- 🔍 Garden search: a 🔍 button next to 🐾 opens a small search bar. Typing fades every tile of your garden that doesn't match, and the count of matches is shown.
+  - Matches crop, plant, egg and decor names and crop mutations (the game's names and the journal's, e.g. "amberlit" finds Ambershine). Several words must all match ("gold carrot"); "-word" excludes ("carrot -gold"). "max weight" finds full-size crops.
+  - 📖 Journal: only plants with a crop that would add a new crop journal entry stay visible (growing ones included). The count shows the plants and how many new entries they hold.
+  - Only your own garden is faded; bare tiles and other gardens are left as they are. The game sometimes redraws tiles, so the fading is re-applied while the bar is open. Esc or ✕ closes the bar and puts every tile back.
+  - Typing in the bar doesn't move your character. It only changes how see-through the tiles look; nothing is sent to the game.
+  - Can be switched off (Settings → Features → 🔍 Garden search button).
+- 🛒 Watering Cans and Crop Cleansers: what's in the Tool Shack now counts toward the 99, so Buy stops when the shack and inventory together hold 99 (one shack stack). It used to buy up to 99 in the inventory on top of the shack's, leaving the rest stuck in the inventory.
+
+## 0.20.1
+- 📱 Game notifications: "Night falls" no longer gets cut off; what it means (sunset, the Spooky shop opens) is in its hover text, like Midnight and Sun rises.
+
+## 0.20.0
+- 🔔 Alerts menu and 📱 Game notifications screen, revamped (same layout for both):
+  - Like with like: one section per shop, every shop listed whether it's open or not. Items sold in a weather or event shop sit under that shop. Each weather's notification sits with its shop (Dawn weather with the Dawn shop, Amber Moon with Amber, Snow with Snow, Thunderstorm with Thunder). The night notifications (Night falls, Midnight, Sun rises) are in "🌙 Night · 🎃 Spooky shop". Rain and Sunny, which have no shop, are in "Other weather".
+  - Sorted by rarity, rarest first. Within a rarity, the item that's in stock least often comes first. A coloured edge on each item shows its rarity.
+  - Two to three columns, one compact switch per item (alerts keep their 🔕/🔔/🔁 switch). Each section header stays at the top while scrolling, says how many are on ("3 of 12 on"), has "all" buttons and folds with a click.
+  - Each item shows how often it was in stock: the share of its shop's restocks over the last 30 days, from Arie's shop history (mg-api.ariedam.fr/stats/items, the data behind the explorer's shop history). Hovering shows the counts (e.g. "in stock in 2 of the last 720 Decor restocks").
+  - Items that were in every restock (e.g. Carrot, Strawberry, Aloe, Beet, Cabbage; Stone Bench and the like in Decor) are hidden; "Show always-available items" lists them. Items you have switched on stay visible. Without shop history (no connection to mg-api), the mod counts restocks itself and hides items that were in all of at least 8 (97% once there are 20).
+  - The shop filter is gone (the sections are the shops); search and the on/off filter stay.
+- Stock rates are fetched once and kept for 12 hours.
+
 ## 0.19.3
 - 🛒 The Buy window can be closed while buying (Close, which reads "Hide (keeps buying)" then, Esc, or a click outside it). The buy goes on, and a note in the corner shows "Buying in the background…" with its progress, then the result. Pressing 🛒 meanwhile says it's still buying instead of doing nothing.
 - The corner notes (rare item alerts and the like): their buttons ("🛒 Open Buy", "🔕 Stop") look like buttons again, and the content is lined up in the middle, so item pictures sit level with the text. The game page's own button styles no longer dim them. Notes are a little wider, so short alerts fit on one line.

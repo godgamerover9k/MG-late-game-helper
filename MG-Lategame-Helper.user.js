@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MG Lategame Helper
 // @namespace    mg-pet-culler
-// @version      0.19.3
+// @version      0.24.0
 // @homepageURL  https://github.com/godgamerover9k/MG-late-game-helper
 // @updateURL    https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/MG-Lategame-Helper.user.js
@@ -30,7 +30,7 @@
 (function () {
 'use strict';
 const TEST_BUILD = false; // true only in the automated-test build: lets scripted clicks through
-const MOD_VERSION = '0.19.3';
+const MOD_VERSION = '0.24.0';
 const REMOTE_POOLS = true; // Buy-only links (other people pressing Buy on this PC); false in the build without them
 const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 // ---------------------------------------------------------------------------
@@ -349,8 +349,11 @@ const net = (() => {
   // Recent traffic, for diagnosing stuck commands: in the F12 console run  copy(__mglhNet())  and paste it to the author
   const trace = [];
   const note = (e) => { trace.push({ t: Date.now() % 1e7, ...e }); if (trace.length > 400) trace.shift(); };
-  try { W.__mglhNet = () => JSON.stringify({ next, frontier, lastOk, desync, desyncAt, seeded, others: (() => { try { return others(); } catch { return []; } })(), trace }); } catch {}
+  const sockInfo = (ws) => (ws ? { state: ws.readyState, ours: ws.send === instanceSend, seen: !!ws.__mgpcSeen, exec: ws.__mgpcExec ?? null, maxSent: ws.__mgpcMaxSent ?? null } : null);
+  try { W.__mglhNet = () => JSON.stringify({ next, frontier, lastOk, desync, desyncAt, seeded, socket: sockInfo(socket), sockets: [...gameSockets].map(sockInfo), ready: (() => { try { return readiness(); } catch { return null; } })(), others: (() => { try { return others(); } catch { return []; } })(), trace }); } catch {}
 
+  // Garden Companion's command stamp (it renumbers every command on the shared WebSocket send)
+  const gcStamp = () => { try { return !!NativeWS.prototype.__gardenCompanionStamp; } catch { return false; } };
   // Game connections this mod watches (the game opens a new one after a drop, e.g. when the tab was in the background)
   const gameSockets = new Set();
   // Pick up a game connection from what it has shown: the last number the server executed on it (every room frame carries
@@ -409,7 +412,11 @@ const net = (() => {
           const ours = ownRequests.delete(env.requestId);
           sentListeners.forEach((f) => { try { f(env.command, ours); } catch {} });
           const num = Number(env.commandSequence);
-          if (!seeded) {
+          if (gcStamp()) {
+            // Garden Companion numbers every command on the shared send below this one, and needs to see the game's own
+            // number to keep the game's bookkeeping in step (its "prediction restamp"): left as it is, only counted
+            next = Math.max(next, (Number.isFinite(num) ? num : next) + 1);
+          } else if (!seeded) {
             if (Number.isFinite(num) && num >= next) next = num + 1;
           } else {
             // Always the next number in line: every send on this socket passes through here, so `next` is exact. Taking
@@ -428,12 +435,16 @@ const net = (() => {
         }
       }
     } catch {}
-    return NativeWS.prototype.send.call(this, data, ...rest); // current shared send, so Arie's Mod's hook still runs
+    this.__mgpcSeen = true; // this connection's sends pass through here (even if another mod wrapped it afterwards)
+    // A send the connection already had of its own (another mod's, e.g. Garden Companion's harvest guard when it loaded
+    // first) is kept and called; otherwise the current shared send, so Arie's Mod's / Garden Companion's hooks still run
+    return (this.__mgpcPrevSend || NativeWS.prototype.send).call(this, data, ...rest);
   };
 
   const attach = (ws) => {
     if (!ws || ws.__mgpc) return;
     ws.__mgpc = true;
+    try { if (Object.prototype.hasOwnProperty.call(ws, 'send') && typeof ws.send === 'function' && ws.send !== instanceSend) ws.__mgpcPrevSend = ws.send; } catch {}
     try { Object.defineProperty(ws, 'send', { value: instanceSend, writable: true, configurable: true }); } catch {}
     ws.addEventListener('message', onMessage);
     ws.addEventListener('close', () => {
@@ -458,7 +469,9 @@ const net = (() => {
     const rc = W.MagicCircle_RoomConnection;
     // our own hatch guard is an own property too: it only counts if it was wrapped over someone else's
     const own = (k) => rc && Object.prototype.hasOwnProperty.call(rc, k) && (!rc[k]?.__mgpcGuard || rc[k].__mgpcHadOwn);
-    if (W.QPM || W.QPM_DEBUG_API || own('trySendMessageNow') || own('sendMessage')) found.push('QPM');
+    // Garden Companion also wraps trySendMessageNow (its harvest guard); that alone isn't QPM
+    if (W.QPM || W.QPM_DEBUG_API || ((own('trySendMessageNow') || own('sendMessage')) && !rc?.__gardenCompanionGuarded)) found.push('QPM');
+    if (gcStamp() || W.__GARDEN_COMPANION_PIXI__) found.push('Garden Companion');
     if (NativeWS.prototype.__qwsSendPatched || W.inGameHotkeys) found.push("Arie's Mod");
     return found;
   };
@@ -469,7 +482,13 @@ const net = (() => {
     if (desync && strict) return { ok: false, reason: "A command got no answer from the game. Move or do anything in the game (so a command goes through), then try again; if it keeps happening, reload the page." };
     if (!seeded && !socket) return { ok: false, reason: 'Waiting for the game to (re)connect: this clears by itself once the game is back.' };
     if (!seeded) return { ok: false, reason: 'The mod started after the game connected. Reload the page once so it can sync, then selling works.' };
-    if (!socket || socket.readyState !== 1 || socket.send !== instanceSend) return { ok: false, reason: 'Not connected to the game right now (or the connection is not one this mod can watch). Reload the page.' };
+    // the connection followed is closing or closed, and another game connection is open and showing numbers: follow it
+    if (socket && socket.readyState !== 1) for (const other of gameSockets) if (other !== socket && other.readyState === 1 && seedFrom(other, 'stale')) break;
+    if (!socket || socket.readyState !== 1) return { ok: false, reason: 'The game\'s connection closed and no new one has shown up yet. If this doesn\'t clear in a few seconds, reload the page.' };
+    // our send is on it, or another mod wrapped it over ours (Garden Companion does when it loads after this mod) and
+    // sends still pass through ours. Right after the game reconnects nothing has been sent yet, so that isn't known:
+    // verify() checks it (the Buy window and the phone link call it)
+    if (socket.send !== instanceSend && !socket.__mgpcSeen) return { ok: false, unseen: true, reason: 'The game reconnected and the mod is checking it can watch the new connection. This clears by itself in a few seconds (or take a step in the game); if it doesn\'t, reload the page.' };
     const rc = W.MagicCircle_RoomConnection;
     if (!rc) return { ok: false, reason: 'The game connection is not ready yet.' };
     if (rc.isCommandSessionReady === false) return { ok: false, reason: 'The game is still connecting.' };
@@ -564,7 +583,17 @@ const net = (() => {
     if (!lastPosition || !socket || socket.readyState !== 1) return false;
     try { socket.send(JSON.stringify({ scopePath: ['Room', 'Quinoa'], type: 'PlayerPosition', position: { ...lastPosition } })); return true; } catch { return false; }
   };
-  return { NativeWS, send, readiness, others, authorizeSell, revokeSell, pingPosition, lastPosition: () => lastPosition, socketNow: () => socket, onSent: (f) => sentListeners.add(f) };
+  // A new game connection whose sends haven't been seen passing through this mod yet (another mod wrapped its send over
+  // ours, and the game hasn't sent anything since it connected): resending where you stand, as the keep-awake ping does,
+  // shows whether they do. Only in that state, at most every 5 seconds. Nothing numbered is sent.
+  let verifyAt = 0;
+  const verify = () => {
+    if (!seeded || !socket || socket.readyState !== 1 || socket.send === instanceSend || socket.__mgpcSeen) return false;
+    if (Date.now() - verifyAt < 5000) return false;
+    verifyAt = Date.now(); note({ ev: 'verify' });
+    return pingPosition();
+  };
+  return { NativeWS, send, readiness, verify, others, authorizeSell, revokeSell, pingPosition, lastPosition: () => lastPosition, socketNow: () => socket, onSent: (f) => sentListeners.add(f) };
 })();
 
 // ---- Hatch guard: lets the UI stop a hatch while the Strength Crystal isn't out ----
@@ -604,6 +633,35 @@ const hatchGuard = (() => {
 })();
 
 // ---- live game state ----
+// ---------- 🧰 Tool Pouch (game 1887+): inventory.toolRing ----------
+// Up to 5 pins, { itemType, id } by what the item is ({ itemType: 'Tool', id: 'WateringCan' }, { itemType: 'Seed', id:
+// 'Aloe' }), or by uuid for a crop, potted plant, pet or one-off tool. The items stay in the bag (inventory.items); a
+// pinned stack doesn't take one of the bag's 100 slots (the game's own count, read from its code: slots used = bag items
+// that aren't pinned). The pins that count are the game's too: distinct ones, a crop / plant / pet / one-off tool only
+// while you have it, the first 5. Here only stacks without a uuid are matched as pinned (tools, seeds, eggs, decor);
+// anything else is counted as using a slot, which can only make the mod think there's less room than there is.
+const POUCH_SLOTS = 5;
+const POUCH_STACK_TYPES = new Set(['Seed', 'Tool', 'Egg', 'Decor']);
+const POUCH_TYPES = new Set(['Seed', 'Tool', 'Egg', 'Decor', 'Produce', 'Plant', 'Pet']);
+// an item's pin id, as the game makes it: the uuid for crops, potted plants, pets and one-off tools, else what it is
+const pinIdOf = (x) => (x.itemType === 'Produce' || x.itemType === 'Plant' || x.itemType === 'Pet' ? x.id : x.itemType === 'Tool' ? ('id' in x ? x.id : x.toolId) : x.itemType === 'Seed' ? x.species : x.itemType === 'Egg' ? x.eggId : x.itemType === 'Decor' ? x.decorId : undefined);
+const pouchPinList = (toolRing, items = []) => {
+  const out = [], seen = new Set();
+  for (const p of Array.isArray(toolRing) ? toolRing : []) {
+    if (!p || !POUCH_TYPES.has(p.itemType) || typeof p.id !== 'string') continue;
+    const k = p.itemType + ':' + p.id; if (seen.has(k)) continue; seen.add(k);
+    // a kind of stack stays pinned while you have none of it (tool ids are names like WateringCan, not uuids)
+    const kind = POUCH_STACK_TYPES.has(p.itemType) && (p.itemType !== 'Tool' || /^[A-Z][A-Za-z0-9]*$/.test(p.id));
+    if (!kind && !items.some((x) => x && x.itemType === p.itemType && pinIdOf(x) === p.id)) continue;
+    out.push({ itemType: p.itemType, id: p.id });
+  }
+  return out.slice(0, POUCH_SLOTS);
+};
+const pouchPins = (toolRing, items = []) => new Set(pouchPinList(toolRing, items).map((p) => p.itemType + ':' + p.id));
+const stackKind = (x) => x?.toolId ?? x?.species ?? x?.eggId ?? x?.decorId ?? null;
+const isPinnedStack = (pins, x) => !!x && !('id' in x) && pins.size > 0 && pins.has(x.itemType + ':' + stackKind(x));
+// bag slots in use, the way the game counts them
+const bagUsed = (items, pins) => (items ?? []).filter((x) => x && !isPinnedStack(pins, x)).length;
 const game = (() => {
   let state = null;
   const listeners = new Set();
@@ -697,7 +755,7 @@ const game = (() => {
       journal: (() => { const j = slot.data?.journal ?? slot.journal; return j && typeof j === 'object' ? (j.pets ?? {}) : null; })(),
       // Crop journal: { [species]: { variantsLogged: [{ variant }] } } (null if it can't be read)
       cropJournal: (() => { const j = slot.data?.journal ?? slot.journal; return j && typeof j === 'object' ? (j.produce ?? {}) : null; })(),
-      inventoryCount: (inv.items ?? []).length,
+      inventoryCount: bagUsed(inv.items, pouchPins(inv.toolRing, inv.items)), // bag slots in use (Tool Pouch stacks don't count)
       // Seconds left on a placed, active Strength Crystal (0 = none out). Garden tiles hold { objectType: 'crystal',
       // crystalType, remainingActiveSeconds } (format as read by Arie's mg-afk-android, CrystalParser.kt).
       strengthCrystal: (() => {
@@ -706,6 +764,17 @@ const game = (() => {
         for (const tiles of [g.tileObjects, g.boardwalkTileObjects]) {
           if (!tiles || typeof tiles !== 'object') continue;
           for (const t of Object.values(tiles)) if (t?.objectType === 'crystal' && t.crystalType === 'Strength') best = Math.max(best, Number(t.remainingActiveSeconds) || 0);
+        }
+        return best;
+      })(),
+      // Seconds left on a placed XP Crystal (0 = none out): active pets gain XP 10% faster while it runs (the game's
+      // own text; its crystal modifiers give xpRateMultiplier 1.1 while any XP crystal has time left)
+      xpCrystal: (() => {
+        const g = slot.data?.garden ?? {};
+        let best = 0;
+        for (const tiles of [g.tileObjects, g.boardwalkTileObjects]) {
+          if (!tiles || typeof tiles !== 'object') continue;
+          for (const t of Object.values(tiles)) if (t?.objectType === 'crystal' && t.crystalType === 'XP') best = Math.max(best, Number(t.remainingActiveSeconds) || 0);
         }
         return best;
       })(),
@@ -810,6 +879,7 @@ const game = (() => {
     onChange: (f) => listeners.add(f),
     readPets, where, waitFor, readShops,
     // Inventory stacks (id + what they are) and which storages you have, for putting purchases away
+    myId: () => myPlayerId(), // your own player id (whatever garden is picked)
     readStorage: (chosenId) => {
       const d = mySlot(chosenId)?.data ?? {};
       const inv = d.inventory ?? {};
@@ -821,6 +891,12 @@ const game = (() => {
         // what's inside each storage, by its id (PetHutch, ToolShack, …)
         storageItems: Object.fromEntries((inv.storages ?? []).filter(Boolean).map((s) => [s.storageId ?? s.decorId ?? s.id, (s.items ?? []).filter(Boolean)])),
         favorites: new Set(inv.favoritedItemIds ?? []),
+        // 🧰 the Tool Pouch's pins ("Tool:WateringCan", …), in slot order, its empty slots, and the bag slots in use as the
+        // game counts them
+        pinList: pouchPinList(inv.toolRing, (inv.items ?? []).filter(Boolean)),
+        pins: pouchPins(inv.toolRing, (inv.items ?? []).filter(Boolean)),
+        pouchFree: Array.isArray(inv.toolRing) ? POUCH_SLOTS - pouchPinList(inv.toolRing, (inv.items ?? []).filter(Boolean)).length : 0, // no pouch in this game: none
+        used: bagUsed((inv.items ?? []).filter(Boolean), pouchPins(inv.toolRing, (inv.items ?? []).filter(Boolean))),
         // free stack spots per storage (capacitySlots minus stacks in it); unknown capacity = no limit known
         storageFree: Object.fromEntries((inv.storages ?? []).filter(Boolean).map((s) => [s.storageId ?? s.decorId ?? s.id, Number.isFinite(Number(s.capacitySlots)) ? Number(s.capacitySlots) - (s.items ?? []).filter(Boolean).length : Infinity])),
       };
@@ -869,8 +945,16 @@ function analyzeRules(pets, OPTS) {
   // Share of time each weather is active (magicgarden.wiki/Weather_Events), pets left out, no micromanagement.
   // Hydro: one event every 40-60 min (taken as ~50 min start-to-start, the generous reading), 10 min long,
   //   Rain 50% / Snow 30% / Thunder 20%.  Lunar: every 4 h, 10 min, Dawn 67% / Amber 33%.
+  //   Since 2026-10-30 night also comes every 4 h, with the lunar cycle: each midnight brings the Dawn or Amber Moon,
+  //   so the lunar timing above stays as it was.
   const HYDRO = 10 / 50, LUNAR = 10 / 240;
   const WEATHER_UPTIME = { Rain: HYDRO * 0.5, Frost: HYDRO * 0.3, Thunder: HYDRO * 0.2, Dawn: LUNAR * 0.67, Amber: LUNAR * 0.33, any: HYDRO + LUNAR };
+  // Nocturnal pets get stronger at night: +15 STR at sunset, +20 at midnight, +10 at sunrise (the game's Forecast
+  // Station). Night lasts 30 min (sunset to sunrise) and, since 2026-10-30, comes every 4 h. The length of each phase
+  // isn't known, so a night counts as 30 min at +15 STR. Nocturnal: Bat, Platypus, Red Fox and the Spooky egg's Moth,
+  // Snake and Toad (the game's announcements), plus any species the game data marks nocturnal.
+  const NOCTURNAL = new Set(['Bat', 'Platypus', 'RedFox', 'Moth', 'Snake', 'Toad']);
+  const NIGHT_SHARE = 30 / 240, NIGHT_BONUS = 15;
   
   // Minutes a full hunger bar lasts ("stamina"), magicgarden.wiki/Pets
   const STAMINA = { Worm: 30, Snail: 60, Bee: 15, Chicken: 60, Bunny: 45, Dragonfly: 15, Pig: 60, Cow: 75, Turkey: 60,
@@ -973,6 +1057,7 @@ function analyzeRules(pets, OPTS) {
         if (num(d.hoursToMature)) HOURS_TO_MATURE[sp] = d.hoursToMature;
         if (typeof d.rarity === 'string') RARITY[sp] = d.rarity;
         if (!(sp in STAMINA)) STAMINA[sp] = 60;
+        if (Object.entries(d).some(([k, v]) => /nocturnal/i.test(k) && v === true) || (Array.isArray(d.tags) && d.tags.some((t) => /nocturnal/i.test(String(t))))) NOCTURNAL.add(sp);
       }
     }
     if (eggs && typeof eggs === 'object') {
@@ -1109,7 +1194,10 @@ function analyzeRules(pets, OPTS) {
       if (a === 'AmberMoonBoost') key = 'amberMoonBoost'; // own niche: maximizing Amber, only compared with other Amber Moon Boost pets
       else if (weather && cat !== 'granter') key = cat;
       // The Strength Crystal (4 h) only counts for one-time-use abilities; continuous ones run at the pet's own max STR
-      let v = effect(a, isContinuous(key) ? p.baseStr : p.str);
+      // Nocturnal pets' long-term abilities: stronger during the nightly 30 min (averaged over the 4-hour cycle)
+      let v = !isContinuous(key) ? effect(a, p.str)
+        : NOCTURNAL.has(p.species) ? (1 - NIGHT_SHARE) * effect(a, p.baseStr) + NIGHT_SHARE * effect(a, p.baseStr + NIGHT_BONUS)
+          : effect(a, p.baseStr);
       if (weather && cat !== 'granter' && a !== 'AmberMoonBoost') v *= WEATHER_UPTIME[weather];
       else if (cat === 'weatherMut') v *= WEATHER_UPTIME.any;
       p.cats[key] = (p.cats[key] ?? 0) + v; fed(key, a);
@@ -1280,7 +1368,7 @@ function analyzeRules(pets, OPTS) {
   const savedByCollection = pets.filter((p) => p.collection);
   
   
-  return { pets, useless, savedByName, savedByCollection, unknown, A, DEFAULT_IGNORED, STAMINA, isContinuous, MAX_SCALE, LIVE, effect, HOURS_TO_MATURE };
+  return { NOCTURNAL, pets, useless, savedByName, savedByCollection, unknown, A, DEFAULT_IGNORED, STAMINA, isContinuous, MAX_SCALE, LIVE, effect, HOURS_TO_MATURE };
 }
 // Tables the UI reads; refreshed when live game data arrives (refreshRulesMeta)
 let RULES_META, A_TABLE, DEFAULT_IGNORED_LIST, STAMINA_MIN, catIsContinuous, MAX_SCALE_OF;
@@ -1317,9 +1405,17 @@ const DEFAULT_SETTINGS = {
   featEggPlan: true, // 📖 which team for each egg
   featMountHint: true, // riding a pet with Thundercharger / Dawn or Amber Capture: what pressing it would do here
   featPlantHint: true, // show a plant's missing journal entries above the game's plant card
+  plantHintPets: false, // 🐾 …and which of your pets eat that crop (the 🐾 button on the hint switches it)
+  featGardenSearch: true, // 🔍 garden search: fade every tile in your garden that doesn't match (or isn't new for the journal)
+  buyPinToPouch: true, // 🧰 Buy everything, bag full: pin stacks that stay in the bag to empty Tool Pouch slots to make room
+  featCleanseAll: true, // 🧼 holding a Crop Cleanser on a plant: cleanse every crop on it with the same weather mutations
+  featBestSpot: true, // 🎯 in the garden search's Filters: the best tile to stand on for Dawn Capture / Amber Capture / Thundercharger
+  bestSpotRide: true, // 🎯 riding a pet with one of those: its best spot marked by itself
+  bestSpotKeepRare: true, // 🎯 Amber Capture: never a spot that takes Amber off a tile of only rare crops (Purple Daisy, …)
   fabDrag: true, // drag 🐾 to move the 🐾 / 🛒 / 🧪 buttons
   keepAwake: true, // keep the game running while its tab is in the background (like Arie's Mod's anti-AFK)
   featChargeTeam: true, // 🌩️ Charge & capture team
+  featCropMutTeams: true, // 🟡 Gold crops and 🌈 Rainbow crops teams (Gold / Rainbow Granter)
   featTeamsOrder: true, // Teams tab puts what's due first (hatching / selling / growing)
   featSellFix: true, // sell dialog: swap in the selling team
   featJoin5: true, // 👥 button: join a public room with 5 players
@@ -1331,10 +1427,13 @@ const DEFAULT_SETTINGS = {
   cropSellWarnMin: 1000000000, // …when the crops are worth at least this many coins
  // hatch pop-up: swap in a hatching team
   featCrystalPlace: true, // offer to put the Strength Crystal out (hatch pop-up, sell dialog)
+  crystalIdleWarn: true, // warn when the Strength Crystal burns its time with no hatching or pet selling, and offer to pick it up
+  crystalIdleMin: 10, // …after this many minutes
   featLogging: true, // 📖 Log buttons (pets and crops)
   featCropJournal: true, // 🌱 crop journal filters
   featSeedButtons: true, // 🌱 Get seeds from the Seed Silo
   featTabOrder: true, // drag tabs to reorder them
+  featUpdateCheck: true, // ⬆ check the mod's GitHub page for a newer version (reads the public file only)
   tabOrder: [], // your tab order (empty = default)
   buyOff: [], // Buy everything: items you switched off ('shop:itemId')
   sellTeam: 'dust', // team the sell dialog swaps in: 'dust' (refund + dust boost) or 'refund'
@@ -1358,6 +1457,7 @@ const DEFAULT_SETTINGS = {
   noLocalStock: ['Grape', 'Lemon', 'Lychee', 'Banana'], // seeds the game lists but doesn't sell you
   retiredEggs: ['WinterEgg', 'HorseEgg'], // eggs left out of the egg plan
   showShopButton: true, // the always-visible 🛒 button
+  showAlwaysItems: false, // alerts / game notifications menus: also list items that are in every restock
   showTeamButton: true, // the 🧪 button above it while eggs are ready or pets can be sold
   taskWarnings: true, // hatch / sell reminders (Strength Crystal, idle pets)
   crystalBlock: true, // stop a hatch and ask first while the Strength Crystal isn't out
@@ -1408,6 +1508,8 @@ if (Array.isArray(settings.ignored) && !settings.seedFinderMigrated) {
   settings.ignored = [...new Set([...settings.ignored, 'SeedFinderI'])];
   settings.seedFinderMigrated = true; store.set('settings', settings);
 }
+// The quest stats sharing in 0.24.0's test builds was taken out before release: what it kept locally goes
+try { for (const k of ['questLog', 'questShareNoticed']) W.localStorage.removeItem('mgpc.' + k); } catch {}
 const saveSettings = () => { store.set('settings', settings); try { applyKeepAwake(); } catch {} try { alertsPhoneSync(); } catch {} }; // (keep-awake follows its switch; alert changes reach the phone app)
 
 const allAbilities = () => Object.keys(A_TABLE);
@@ -1521,9 +1623,12 @@ const petImg = (p, size = 40) => {
   if (IS_DISCORD) return fb;
   const composed = (key) => `https://mg-api.ariedam.fr/assets/sprites/composed?key=${encodeURIComponent('sprite/pet/' + key)}${mut.length ? '&mutations=' + encodeURIComponent(mut.join(',')) : ''}`;
   const name = speciesName(p.species);
-  // tried in order: by id, by name, then the plain picture (no Gold/Rainbow tint), then the initials
-  const urls = [...new Set([composed(p.species), composed(name), `https://mg-api.ariedam.fr/assets/sprites/pets/${encodeURIComponent(name)}.png`])];
-  return `<span class="pimg" style="width:${size}px;height:${size}px"><img src="${urls[0]}" data-next="${esc(urls.slice(1).join('|'))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="var n=(this.dataset.next||'').split('|').filter(Boolean);if(n.length){this.dataset.next=n.slice(1).join('|');this.src=n[0];}else{this.parentNode.classList.add('fb');this.parentNode.textContent='${initials(p)}';}"></span>`;
+  // tried in order: by id, by name, then the plain picture (no Gold/Rainbow tint): the game data's own picture address
+  // (pets/SnowFox.png: newer pets like Snow Fox and Fire Horse only had that one), by id, by name; then the initials
+  const own = unwrapLive(liveData?.pets)?.[p.species]?.sprite;
+  const plain = typeof own === 'string' && /^https:\/\/mg-api\.ariedam\.fr\//.test(own) ? [own] : [];
+  const urls = [...new Set([composed(p.species), composed(name), ...plain, `https://mg-api.ariedam.fr/assets/sprites/pets/${encodeURIComponent(p.species)}.png`, `https://mg-api.ariedam.fr/assets/sprites/pets/${encodeURIComponent(name)}.png`])];
+  return `<span class="pimg" style="width:${size}px;height:${size}px"><img src="${urls[0]}" data-k="${esc(urls[0])}" data-next="${esc(urls.slice(1).join('|'))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="var n=(this.dataset.next||'').split('|').filter(Boolean);if(n.length){this.dataset.next=n.slice(1).join('|');this.src=n[0];}else{this.parentNode.classList.add('fb');this.parentNode.textContent='${initials(p)}';}"></span>`;
 };
 
 
@@ -1739,9 +1844,26 @@ const STYLE = `
 #mgpc-shopfab{position:fixed;left:14px;bottom:62px;z-index:2147483645;min-width:40px;height:40px;padding:0 10px;border-radius:20px;border:1px solid #474b55;background:#25282e;color:#9a9da5;font:600 14px system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);opacity:.75}
 #mgpc-teamfab{position:fixed;left:14px;bottom:110px;z-index:2147483645;height:40px;padding:0 12px;border-radius:20px;border:1px solid #6f8fd6;background:#2b4a8a;color:#fff;font:600 13px system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);display:none}
 #mgpc-teamfab.show{display:block}
+#mgpc-gardenfab{position:fixed;left:62px;bottom:14px;z-index:2147483645;width:40px;height:40px;border-radius:20px;border:1px solid #474b55;background:#25282e;color:#fff;font:600 16px system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);opacity:.8}
+#mgpc-gardenfab.on{background:#2b4a8a;border-color:#6f8fd6;opacity:1}
+#mgpc-gsearch{position:fixed;z-index:2147483645;display:none;gap:6px;align-items:center;padding:5px 6px 5px 10px;border-radius:20px;background:rgba(20,22,26,.92);border:1px solid #3a3d45;color:#e8e8e8;font:600 13px system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+#mgpc-gsearch.open{display:flex}
+#mgpc-gsearch input{width:190px;background:#14161a;color:#e8e6e1;border:1px solid #3a3d45;border-radius:14px;padding:5px 10px;font:inherit;font-weight:500;outline:none}
+#mgpc-gsearch input:focus{border-color:#6f8fd6}
+#mgpc-gsearch button{height:28px;padding:0 10px;border-radius:14px;border:1px solid #474b55;background:#25282e;color:#e8e8e8;font:inherit;cursor:pointer;white-space:nowrap}
+#mgpc-gsearch button.on{background:#2b4a8a;border-color:#6f8fd6;color:#fff}
+#mgpc-gsearch .n{min-width:64px;opacity:.85;font-weight:500;white-space:nowrap}
+#mgpc-gsearch .gsf{position:absolute;left:0;bottom:calc(100% + 6px);display:none;flex-direction:column;gap:6px;width:max-content;max-width:min(470px,calc(100vw - 24px));padding:8px 10px;border-radius:14px;background:rgba(20,22,26,.95);border:1px solid #3a3d45;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+#mgpc-gsearch .gsf.open{display:flex}
+#mgpc-gsearch .gsf .row{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+#mgpc-gsearch .gsf .lb{min-width:62px;opacity:.75;font-weight:500}
+#mgpc-gsearch .gsf button{height:26px;padding:0 8px;display:inline-flex;align-items:center;gap:4px;font-weight:500}
+#mgpc-gsearch .gsf button img{width:16px;height:16px}
 #mgpc-shopfab.can{background:#c0392b;border-color:#e74c3c;color:#fff;cursor:pointer;opacity:1;animation:mgpcPulse 2s ease-in-out infinite}
 @keyframes mgpcPulse{0%,100%{box-shadow:0 4px 14px rgba(0,0,0,.4)}50%{box-shadow:0 0 0 4px rgba(231,76,60,.35),0 4px 14px rgba(0,0,0,.4)}}
 #mgpc-fab{position:fixed;left:14px;bottom:14px;z-index:2147483645;width:40px;height:40px;border-radius:50%;border:1px solid #474b55;background:#25282e;color:#fff;font-size:20px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+#mgpc-fab.upd::after{content:'';position:absolute;top:0;right:0;width:11px;height:11px;border-radius:50%;background:#e74c3c;border:2px solid #1b1d22}
+#${ID} .hd .updlink{margin-left:8px;padding:1px 8px;border-radius:10px;background:#c0392b;color:#fff;font-size:12px;font-weight:600;text-decoration:none;white-space:nowrap}#${ID} .hd .updlink:hover{background:#e74c3c}
 #mgpc-toasts{position:fixed;right:16px;bottom:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none}#mgpc-toasts .mgpc-toast{pointer-events:auto}
 .mgpc-toast{position:relative;max-width:420px;display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:12px;background:#24301f;border:1px solid #5bbf73;color:#e8e6e1;font:13px/1.45 system-ui,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.5)}
 .mgpc-toast{align-items:center}
@@ -1804,6 +1926,23 @@ const STYLE = `
 #mgpc-crystal button{border-radius:8px;padding:7px 14px;font:600 13px system-ui,sans-serif;cursor:pointer;border:1px solid #ff8a7d;background:#7a2222;color:#fff}
 #mgpc-panel .bell{cursor:pointer;opacity:.45;margin-left:2px}#mgpc-panel .bell.on{opacity:1}
 #mgpc-modal.alertdlg .card{width:min(640px,96vw)}
+#mgpc-modal.griddlg .card{width:min(900px,96vw)}
+#mgpc-modal .gn-sec{margin:2px 0 6px}
+#mgpc-modal .gn-sec>summary{display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:1;background:#16181c;padding:7px 2px;cursor:pointer;list-style:none;border-bottom:1px solid #2a2d33}
+#mgpc-modal .gn-sec>summary::-webkit-details-marker{display:none}
+#mgpc-modal .gn-caret{display:inline-block;transition:transform .15s;color:#8a8d95}#mgpc-modal .gn-sec[open] .gn-caret{transform:rotate(90deg)}
+#mgpc-modal .gn-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:3px 12px;padding:6px 0 4px}
+#mgpc-modal .gn-cell{display:flex;align-items:center;gap:8px;padding:3px 6px 3px 8px;border-radius:8px;min-height:34px;position:relative}
+#mgpc-modal .gn-cell::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:3px;background:var(--edge)}
+#mgpc-modal .gn-cell:hover{background:#1f2228}
+#mgpc-modal .gn-ev{font-size:18px;width:24px;text-align:center;flex:0 0 auto}
+#mgpc-modal .gn-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#mgpc-modal .gn-tog{flex:0 0 auto;width:40px;height:28px;padding:0;margin:0;border-radius:8px;border:1px solid #474b55;background:#23262c;font-size:15px;opacity:.6}
+#mgpc-modal .gn-tog.on{background:#3d5a8a;border-color:#5b7fbf;opacity:1}
+#mgpc-modal .gn-cell .alrt-seg button{padding:3px 7px;font-size:13px}
+#mgpc-modal .gn-note{font-size:12px;color:#8a8d95;padding:4px 8px}
+#mgpc-modal .gn-rate{font-size:11px;color:#8a8d95;margin-left:2px}
+#mgpc-modal .gn-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:#8a8d95;min-height:20px}
 #mgpc-modal .alrt-tools{display:flex;gap:8px}#mgpc-modal .alrt-q{flex:1;min-width:0;background:#111;color:#eee;border:1px solid #474b55;border-radius:8px;padding:7px 9px;font:inherit}
 #mgpc-modal .alrt-f{background:#111;color:#eee;border:1px solid #474b55;border-radius:8px;font:inherit}
 #mgpc-modal .alrt-list{overflow:auto;min-height:120px;flex:1}
@@ -1815,7 +1954,24 @@ const STYLE = `
 #mgpc-modal .alrt-seg button.on{background:#3d5a8a;opacity:1}#mgpc-modal .alrt-seg.dflt button.on{background:#344156;opacity:.8}
 #mgpc-planthint{position:fixed;z-index:2147483640;transform:translate(-50%,-100%);display:none;gap:4px;align-items:center;padding:4px 8px;border-radius:10px;background:rgba(20,22,26,.82);color:#e8e8e8;font:600 12px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #mgpc-mounthint{position:fixed;left:50%;top:12px;z-index:2147483640;transform:translateX(-50%);display:none;gap:10px;align-items:center;padding:5px 12px;border-radius:10px;background:rgba(20,22,26,.85);color:#e8e8e8;font:600 13px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}#mgpc-mounthint .t{opacity:.8}
+#mgpc-mounthint{width:max-content;max-width:calc(100vw - 24px);flex-wrap:wrap;justify-content:center}#mgpc-mounthint .bs{opacity:.8;font-weight:500}
+#mgpc-cleanse{position:fixed;left:50%;top:52px;z-index:2147483640;transform:translateX(-50%);display:none;flex-wrap:wrap;justify-content:center;gap:4px 8px;align-items:center;width:max-content;max-width:min(440px,calc(100vw - 24px));padding:4px 8px;border-radius:10px;background:rgba(20,22,26,.85);color:#e8e8e8;font:600 12px system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)}#mgpc-cleanse.oncard{transform:translate(-50%,-100%)}
+#mgpc-cleanse button{cursor:pointer}#mgpc-cleanse button.go{font:700 12px system-ui,sans-serif;padding:3px 10px;border-radius:8px;border:0;background:#5b8def;color:#fff}#mgpc-cleanse button.pk{font:600 11px system-ui,sans-serif;padding:2px 8px;border-radius:8px;border:1px solid #474b55;background:#25282e;color:#e8e8e8}#mgpc-cleanse button.pk.on{background:#2b4a8a;border-color:#6f8fd6}#mgpc-cleanse button.go.armed{background:#d9534f}
+#mgpc-cleanse .sub{flex-basis:100%;text-align:center;font-weight:500;font-size:12px;opacity:.8}
+#mgpc-cleanse .row{flex-basis:100%;display:flex;flex-wrap:wrap;justify-content:center;gap:4px;align-items:center}#mgpc-cleanse .row button{height:24px;padding:0 8px;display:inline-flex;align-items:center;gap:4px;border-radius:12px;border:1px solid #474b55;background:#25282e;color:#e8e8e8;font:500 12px system-ui,sans-serif}#mgpc-cleanse .row button.on{background:#2b4a8a;border-color:#6f8fd6;color:#fff}#mgpc-cleanse .row button img{width:16px;height:16px}#mgpc-cleanse .or{opacity:.75;font-weight:500;font-size:12px}
+#mgpc-mounthint .warn{color:#ffb4a0;font-weight:600}
+.mgpc-bestspot{position:fixed;z-index:2147483638;display:none;pointer-events:none;box-sizing:border-box;border:2px dashed var(--c,#ffd65a);border-radius:8px;background:rgba(255,255,255,.05)}
+.mgpc-bestspot .mid{position:absolute;left:33.33%;top:33.33%;width:33.34%;height:33.34%;box-sizing:border-box;border:3px solid var(--c,#ffd65a);border-radius:6px;background:rgba(255,255,255,.12);box-shadow:0 0 12px var(--c,#ffd65a)}
+.mgpc-bestspot .tag{position:absolute;left:50%;top:-4px;transform:translate(-50%,-100%);padding:2px 8px;border-radius:9px;background:rgba(20,22,26,.9);color:var(--c,#ffd65a);font:700 12px system-ui,sans-serif;white-space:nowrap}
+.mgpc-bestspot.tagonly{border:0;background:none}.mgpc-bestspot.tagonly .mid{display:none}.mgpc-bestspot.off{border:0;background:none;width:0;height:0}.mgpc-bestspot.off .mid{display:none}.mgpc-bestspot.off .tag{top:0;transform:translate(-50%,-50%);border:1px solid var(--c,#ffd65a)}
+#mgpc-gsearch .gsf .bsr{border-top:1px solid #3a3d45;padding-top:6px}
+#mgpc-gsearch .gsf .bsi{max-width:450px;font-weight:500;font-size:12px;line-height:1.35;opacity:.9;white-space:normal}
 #mgpc-planthint .t{margin-right:2px;opacity:.85}#mgpc-planthint .v{display:inline-flex}
+#mgpc-planthint{flex-wrap:wrap;justify-content:center;max-width:360px}
+#mgpc-planthint .pt{pointer-events:auto;cursor:pointer;margin-left:4px;padding:1px 6px;border:0;border-radius:8px;background:rgba(255,255,255,.14);color:inherit;font:inherit;line-height:18px}
+#mgpc-planthint .pt.on{background:#3a6ea5}
+#mgpc-planthint .pets{flex-basis:100%;display:flex;flex-wrap:wrap;gap:2px 10px;justify-content:center;font-weight:500}
+#mgpc-planthint .pets span{display:inline-flex;align-items:center;gap:3px}#mgpc-planthint .pets img{width:18px;height:18px;object-fit:contain}#mgpc-planthint .pets .m{opacity:.7}
 #mgpc-crystal .hteams{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
 #mgpc-crystal .note{font-size:12px;color:#f3d0cc}
 #mgpc-crystal .msg{font-size:13px;color:#ffe08a;min-height:0}
@@ -1828,27 +1984,38 @@ const STYLE = `
 #mgpc-modal .row{padding:5px 8px;border:1px solid #2b2e35;border-radius:8px;background:#1d2025}
 #mgpc-modal .row.ok{border-color:#2f6b40}#mgpc-modal .row.bad{border-color:#7a3a3a}
 #mgpc-modal .acts{display:flex;justify-content:flex-end;gap:8px}
-#${ID} .teams{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:10px;padding:10px 12px;align-items:start}
+#${ID} .teams{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));grid-auto-flow:row dense;gap:8px;padding:8px 10px;align-items:start}
 #${ID} .team.wide{grid-column:1/-1}
-#${ID} .team{border:1px solid #30333a;border-radius:10px;padding:10px 12px;background:#202329}
-#${ID} .thd{display:flex;align-items:center;gap:10px;margin-bottom:2px;flex-wrap:wrap}
-#${ID} .thd b{font-size:14px;flex:1}
-#${ID} .thd .tval{order:3;flex-basis:100%;color:#8fc7a0;font-weight:600}
-#${ID} .tpets{display:flex;flex-direction:column;gap:4px;margin-top:6px}
-#${ID} .team.wide .tpets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
-#${ID} .tpet{display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:8px;background:#25282e}
-#${ID} .tpet .tl{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;min-width:0}
-#${ID} .tpet .tl .muted{font-size:12px}
+#${ID} .team{border:1px solid #30333a;border-radius:9px;padding:7px 9px;background:#202329}
+#${ID} .team.isout{border-color:#3d6b4a;box-shadow:inset 3px 0 0 #4f9a63}
+#${ID} .thd{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#${ID} .thd b{font-size:13px;flex:1;min-width:0;cursor:help}
+#${ID} .thd b .info{font-weight:400;font-size:11px;opacity:.45}
+#${ID} .thd .tval{color:#8fc7a0;font-weight:600}
+#${ID} .thd button.tapply,#${ID} .thd>button{padding:2px 10px;font-size:12px;line-height:18px}
+#${ID} .tsub{font-size:12px;margin:1px 0 0}#${ID} .tsub .tval{color:#8fc7a0;font-weight:600}
+#${ID} .tpets{display:flex;flex-direction:column;gap:2px;margin-top:5px}
+#${ID} .team.wide .tpets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+#${ID} .tpet{display:flex;flex-wrap:wrap;gap:2px 5px;align-items:center;padding:2px 5px;border-radius:6px;background:#25282e;font-size:12px;min-height:24px}
+#${ID} .tpet .pimg{flex:none}
+#${ID} .tpet .tn{white-space:nowrap}
+#${ID} .tpet .ts{font-size:11px;white-space:nowrap}
+#${ID} .tpet .tt{display:flex;flex-wrap:wrap;gap:2px}#${ID} .tpet .tt:empty{display:none}
+#${ID} .tpet .tt .tag{font-size:10px;padding:0 5px;margin:0;white-space:nowrap}
+#${ID} .tpet .tv{margin-left:auto;font-size:11px;white-space:nowrap;padding-left:4px}
+#${ID} .tpet .tl{display:flex;flex-wrap:wrap;align-items:center;gap:1px 6px;min-width:0;flex:1}
+#${ID} .tpet .tl .muted{font-size:11px}
 #${ID} .team .why{font-size:12px;line-height:1.35}
+#${ID} .team.wide .lvlnote{font-size:12px;margin-top:1px}
 #${ID} .tpet.out{outline:1px solid #3d6b4a}
 #${ID} .warn{color:#e6c46a}
-#${ID} .jplan{margin-top:8px}
+#${ID} .jplan{margin-top:6px}#${ID} .jplan td{padding:3px 8px}#${ID} .jplan th{padding:4px 8px}
 #${ID} .jplan td{vertical-align:middle}
 #${ID} .jplan tr.ready td{background:#1f2a22}
 #${ID} .tag.have{opacity:.55}
 #${ID} .shopitems{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 #${ID} .lvlprio{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}
-#${ID} .lchip{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 8px;border-radius:12px;background:#2a2e36}
+#${ID} .lchip{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 8px;border-radius:12px;background:#2a2e36;font-size:12px}
 #${ID} .lchip.off{opacity:.45;text-decoration:line-through}
 #${ID} button.mini{padding:0 6px;height:20px;font-size:11px;line-height:1;border-radius:10px}
 #${ID} button.mini.on{background:#3d6b4a}
@@ -1864,8 +2031,8 @@ let fabDragged = false;
 const fabPos = () => ({ left: 14, bottom: 14, ...(store.get('fabPos', null) || {}) });
 function setFabPos(pos, save) {
   const left = Math.max(0, Math.min(innerWidth - 44, Math.round(pos.left))), bottom = Math.max(0, Math.min(innerHeight - 140, Math.round(pos.bottom)));
-  [['mgpc-fab', 0], ['mgpc-shopfab', 48], ['mgpc-teamfab', 96]].forEach(([id, up]) => {
-    const b = document.getElementById(id); if (b) { b.style.left = left + 'px'; b.style.bottom = (bottom + up) + 'px'; }
+  [['mgpc-fab', 0], ['mgpc-shopfab', 48], ['mgpc-teamfab', 96], ['mgpc-gardenfab', 0, 48]].forEach(([id, up, right = 0]) => {
+    const b = document.getElementById(id); if (b) { b.style.left = (left + right) + 'px'; b.style.bottom = (bottom + up) + 'px'; }
   });
   if (save) store.set('fabPos', { left, bottom });
 }
@@ -1873,7 +2040,7 @@ addEventListener('resize', () => { if (document.getElementById('mgpc-fab')) setF
 // Until you've dragged them yourself, the buttons step right, past other mods' buttons in that corner (e.g. Garden
 // Companion, Vaxen's Fav Rooms). Anything covering most of the screen (the game's own layers) doesn't count.
 function fabsCovered() {
-  const mine = ['mgpc-fab', 'mgpc-shopfab', 'mgpc-teamfab'].map((id) => document.getElementById(id)).filter((b) => b && getComputedStyle(b).display !== 'none');
+  const mine = ['mgpc-fab', 'mgpc-shopfab', 'mgpc-teamfab', 'mgpc-gardenfab'].map((id) => document.getElementById(id)).filter((b) => b && getComputedStyle(b).display !== 'none');
   const big = (el) => { const r = el.getBoundingClientRect(); return r.width * r.height > innerWidth * innerHeight * 0.3; };
   for (const b of mine) {
     const r = b.getBoundingClientRect();
@@ -1881,7 +2048,7 @@ function fabsCovered() {
       for (const el of document.elementsFromPoint(x, y)) {
         if (mine.some((m) => m === el || m.contains(el))) continue;
         if (el === document.documentElement || el === document.body || el.tagName === 'CANVAS' || big(el)) continue;
-        if (el.closest?.('#mgpc-panel, #mgpc-modal, #mgpc-crystal')) continue;
+        if (el.closest?.('#mgpc-panel, #mgpc-modal, #mgpc-crystal, #mgpc-gsearch')) continue;
         return true;
       }
     }
@@ -1925,6 +2092,11 @@ function mount() {
   // 💰 part → the Useless tab (pets to sell); the rest → Teams
   tfab.onclick = (e) => { tfab.blur(); openTab(e.target.closest?.('[data-go]')?.dataset.go || tfab.dataset.main || 'teams'); };
   document.body.appendChild(tfab);
+  const gfab = document.createElement('button'); gfab.id = 'mgpc-gardenfab'; gfab.textContent = '🔍';
+  gfab.title = 'Garden search: fade everything in your garden that doesn\'t match (📖 = plants whose crop still has journal entries missing)';
+  gfab.onclick = () => { gfab.blur(); gardenSearch.toggle(); };
+  if (settings.featGardenSearch === false) gfab.style.display = 'none';
+  document.body.appendChild(gfab);
   setFabPos(fabPos(), false);
   // other mods add their buttons a bit later: check a few times
   [500, 2000, 5000, 10000, 20000].forEach((ms) => setTimeout(() => { try { avoidOtherButtons(); } catch {} }, ms));
@@ -2021,7 +2193,7 @@ function overlayOf(node) {
 function topZ(except) {
   let max = 0;
   for (const n of document.body.querySelectorAll('body > *, body > * > *')) {
-    if (n === except || except.contains(n) || n.id === 'mgpc-fab' || n.id === 'mgpc-shopfab' || n.id === 'mgpc-teamfab' || n.id === 'mgpc-modal') continue;
+    if (n === except || except.contains(n) || n.id === 'mgpc-fab' || n.id === 'mgpc-shopfab' || n.id === 'mgpc-teamfab' || n.id === 'mgpc-gardenfab' || n.id === 'mgpc-gsearch' || n.id === 'mgpc-modal') continue;
     const cs = getComputedStyle(n);
     if (cs.position !== 'fixed' && cs.position !== 'absolute') continue;
     if (cs.display === 'none' || cs.visibility === 'hidden') continue;
@@ -2038,7 +2210,7 @@ document.addEventListener('pointerdown', (e) => {
   const el = document.getElementById(ID); if (!el || !el.classList.contains('open')) return;
   const target = e.composedPath?.()[0] || e.target;
   if (el.contains(target)) return bringToFront();
-  if (target.closest?.('#mgpc-modal, #mgpc-fab, #mgpc-shopfab, #mgpc-teamfab')) return;
+  if (target.closest?.('#mgpc-modal, #mgpc-fab, #mgpc-shopfab, #mgpc-teamfab, #mgpc-gardenfab, #mgpc-gsearch')) return;
   const win = overlayOf(target); if (!win || win.contains(el)) return; // a click on the game itself changes nothing
   const z = zOf(win), mine = zOf(el) ?? 0;
   // Only other mods' floating windows (they sit at z-index 1000+); the game's own bars and menus never push us back
@@ -2133,13 +2305,35 @@ function render() {
   const drag = settings.featTabOrder === false ? '' : ' draggable="true" title="Drag to reorder"';
   tabs.innerHTML = tabList.sort(([a], [b]) => tabRank(a) - tabRank(b))
     .map(([k, t]) => `<button data-tab="${k}" class="${tab === k ? 'on' : ''}"${drag}>${t}</button>`).join('');
-  if (tab === 'useless') renderUseless(bar, body);
-  else if (tab === 'kept') renderKept(bar, body);
-  else if (tab === 'maybe') renderMaybe(bar, body);
-  else if (tab === 'journal') renderJournal(bar, body);
-  else if (tab === 'teams') renderTeams(bar, body);
-  else if (tab === 'shop') renderShop(bar, body);
-  else renderSettings(bar, body);
+  keepImages(el, () => {
+    if (tab === 'useless') renderUseless(bar, body);
+    else if (tab === 'kept') renderKept(bar, body);
+    else if (tab === 'maybe') renderMaybe(bar, body);
+    else if (tab === 'journal') renderJournal(bar, body);
+    else if (tab === 'teams') renderTeams(bar, body);
+    else if (tab === 'shop') renderShop(bar, body);
+    else renderSettings(bar, body);
+  });
+}
+// A redraw rebuilds the panel from HTML. Pictures that were already showing are moved into the new HTML in place of
+// their fresh copies (same picture: data-k, else the address), so they don't blink while loading again.
+function keepImages(container, draw) {
+  const old = new Map();
+  for (const im of container.querySelectorAll('img')) {
+    const k = im.dataset.k || im.getAttribute('src');
+    if (!k || !im.complete || !(im.naturalWidth > 0)) continue;
+    (old.get(k) ?? old.set(k, []).get(k)).push(im);
+  }
+  draw();
+  if (!old.size) return;
+  for (const im of [...container.querySelectorAll('img')]) {
+    const k = im.dataset.k || im.getAttribute('src');
+    const o = k && old.get(k)?.shift();
+    if (!o || o === im) continue;
+    o.className = im.className; o.style.cssText = im.style.cssText;
+    if (im.title) o.title = im.title; else o.removeAttribute('title');
+    im.replaceWith(o);
+  }
 }
 
 // Why a pet can't be sold right now (null = it can)
@@ -2186,7 +2380,9 @@ function petRow(p, opts) {
   </div>`;
 }
 
-function renderUseless(bar, body) {
+// The Useless tab's top bar (counts, ticked dust, "Sell ticked (N)"): redrawn alone when ticks change, so the pet list
+// (and its pictures) stays as it is
+function renderUselessBar(bar) {
   const ready = net.readiness(true);
   for (const id of [...selected]) if (!result.useless.find((p) => p.id === id && !sellBlock(p))) selected.delete(id);
   const sellable = result.useless.filter((p) => !sellBlock(p));
@@ -2196,6 +2392,17 @@ function renderUseless(bar, body) {
     <span class="muted" title="Where each pet is">🎒 inventory · 🏠 hutch · 🌱 active</span>
     <button data-a="all">Tick all sellable</button><button data-a="none">Clear</button><button data-a="copy">Copy report</button>
     <button data-a="sell" ${selected.size && ready.ok ? '' : 'disabled'} title="Sell all ticked pets in one go (asks to confirm)">Sell ticked (${selected.size})…</button>`;
+  return ready;
+}
+// Ticks changed (one box, Tick all, Clear): the boxes are set where they are and the bar redrawn; the list isn't rebuilt
+function ticksChanged() {
+  const el = document.getElementById(ID);
+  if (tab !== 'useless' || !el || !result) { render(); return; }
+  renderUselessBar(el.querySelector('.bar'));
+  for (const box of el.querySelectorAll('.body input[data-sel]')) box.checked = selected.has(box.dataset.sel);
+}
+function renderUseless(bar, body) {
+  const ready = renderUselessBar(bar);
   const others = net.others();
   const notes = (ready.ok ? '' : `<div class="note">Selling is off: ${esc(ready.reason)}</div>`) +
     (others.length ? `<div class="note ok">Working alongside ${esc(others.join(' and '))} — commands share one numbering, so they don't clash.</div>` : '');
@@ -2367,14 +2574,22 @@ function cropSprites(sp) {
   return [...new Set([d.crop?.sprite, d.plant?.sprite, fallback, d.seed?.sprite].filter((x) => typeof x === 'string' && /^https:\/\//.test(x)))];
 }
 // The seed a crop grows from. Rare variants (Four-Leaf Clover, Purple Daisy, Double Snowdrop, Variegated Cattail,
-// Embercrown, Stormcap, …) have no seed of their own in the silo: they share their base plant's seed (same seed picture).
+// Embercrown, Stormcap, Witchfire, …) have no seed of their own in the silo: they grow from their base plant's seed,
+// whose picture they share in the game data, and the base is a patch (it has crop slots) where there's a choice.
+// Witchfire is the exception: its "Witchfire Spore" has the Mushroom Spore's picture, but it grows in Foxfire Patches
+// (you, 2026-11-05: Foxfire and Witchfire should show the same seeds).
+const SEED_OF_VARIANT = { Witchfire: 'Foxfire' };
 function seedSpeciesOf(sp) {
   const plants = unwrapLive(liveData?.plants) ?? {};
+  const shops = (k) => plants[k]?.seed?.eligibleShops ?? [];
+  if (shops(sp).length) return sp; // sold in a shop: its own seed
+  const base = SEED_OF_VARIANT[sp];
+  if (base && plants[base]?.seed) return base;
   const pic = (k) => String(plants[k]?.seed?.sprite ?? '').split('?')[0].split('/').pop().replace(/\.png$/i, '');
   const mine = pic(sp);
-  if (!mine || (plants[sp]?.seed?.eligibleShops ?? []).length) return sp;
-  if (mine !== sp && plants[mine]?.seed) return mine;
-  return Object.keys(plants).find((k) => k !== sp && pic(k) === mine && (plants[k]?.seed?.eligibleShops ?? []).length) ?? sp;
+  if (!mine) return sp;
+  const cands = Object.keys(plants).filter((k) => k !== sp && pic(k) === mine && shops(k).length);
+  return cands.find((k) => plants[k]?.plant?.slotCapacity) ?? (mine !== sp && plants[mine]?.seed ? mine : cands[0] ?? sp);
 }
 // Take every seed of one species out of the Seed Silo into your inventory (stacks without a uuid go by species)
 async function getSeeds(cropSp) {
@@ -2383,7 +2598,7 @@ async function getSeeds(cropSp) {
   const stacks = (inv.storageItems?.SeedSilo ?? []).filter((x) => x?.species === sp);
   if (!stacks.length) return;
   const hasStack = inv.items.some((x) => x?.itemType === 'Seed' && x.species === sp);
-  if (!hasStack && inv.items.length >= INVENTORY_MAX) { logMsg = { ok: false, text: 'Your inventory is full, so the seeds can\'t come out of the silo.' }; render(); return; }
+  if (!hasStack && inv.used >= INVENTORY_MAX) { logMsg = { ok: false, text: 'Your inventory is full, so the seeds can\'t come out of the silo.' }; render(); return; }
   for (const x of stacks) {
     const r = await storageMove(x.id ?? sp, 'SeedSilo', 'inventory');
     if (!r.ok) { logMsg = { ok: false, text: `Couldn't take the ${pretty(sp)} seeds out of the silo (${r.reason || r.code}).` }; render(); return; }
@@ -2511,7 +2726,10 @@ const TEAM_SIZE = 3;
 // by b x 0.69-0.73 for the usual b (5-43%), for Gold (1%, pity 200) and Rainbow (0.1%, pity 2000) alike: ~70%.
 const PITY_MUT_DEFAULT = 0.7;
 let strAtMax = null; // null = current strength; a Set of pet ids (or 'all') = use those pets' max strength instead
-const teamStr = (p) => ((strAtMax === 'all' || strAtMax?.has?.(p.id)) ? (p.baseStr ?? 0) : (p.curStr ?? p.baseStr ?? 0)) + (settings.crystal ? 10 : 0);
+// Long-term teams (the crop granters, out for hours) leave the crystal out: it's up for a hatch or a sale, not all day
+let crystalOff = false;
+const teamStr = (p) => ((strAtMax === 'all' || strAtMax?.has?.(p.id)) ? (p.baseStr ?? 0) : (p.curStr ?? p.baseStr ?? 0)) + (settings.crystal && !crystalOff ? 10 : 0);
+const forGoal = (g, fn) => { if (!g?.longTerm) return fn(); const old = crystalOff; crystalOff = true; try { return fn(); } finally { crystalOff = old; } };
 const withStr = (mode, fn) => { const old = strAtMax; strAtMax = mode; try { return fn(); } finally { strAtMax = old; } };
 // Sum of one category over a pet's abilities, at current strength
 const abilitySum = (p, cat) => {
@@ -2529,7 +2747,7 @@ const TEAM_GOALS = [
     why: 'Expected boost to max STR on every pet you hatch.',
     score: (t) => t.reduce((s, p) => s + abilitySum(p, 'hatchSize'), 0),
     show: (v) => `+${v.toFixed(2)}% max STR per hatch` },
-  { key: 'mutation', title: 'Gold / Rainbow hatching', icon: '🌈', cats: ['petMut', 'doubleHatch'],
+  { key: 'mutation', title: 'Gold / Rainbow hatching', icon: '🧬', cats: ['petMut', 'doubleHatch'],
     why: 'Pet Mutation Boost raises the Gold/Rainbow chance (pity trims it to ~70%); Double Hatch adds whole extra hatches, which also count toward pity.',
     score: (t) => (1 + atLeastOne(t.map((p) => abilitySum(p, 'doubleHatch')))) * (1 + (settings.pityMutFactor ?? PITY_MUT_DEFAULT) * t.reduce((s, p) => s + abilitySum(p, 'petMut'), 0) / 100) - 1,
     show: (v) => `+${(v * 100).toFixed(1)}% Gold/Rainbow pets per egg` },
@@ -2567,6 +2785,16 @@ const TEAM_GOALS = [
       return kinds.size + extra + str;
     },
     show: (v) => { const n = Math.floor(v + 1e-9); return `${n} of 3 abilities covered`; } },
+  // Gold / Rainbow Granter (every Gold / Rainbow pet has it): each pet has its own chance every minute to give a crop in
+  // your garden the mutation, scaling with STR (0.72% at STR 100). Independent rolls: expected crops add up.
+  { key: 'goldCrop', title: 'Gold crops', icon: '🟡', cats: ['GOLD granter'], longTerm: true,
+    why: 'Gold Granter (every Gold pet has it): each pet has its own chance every minute to turn a crop in your garden Gold; the chance grows with STR. Leave them out while crops grow (counted without the Strength Crystal, since they stay out for hours).',
+    score: (t) => t.reduce((s, p) => s + abilitySum(p, 'GOLD granter'), 0),
+    show: (v) => `≈${(v * 60).toFixed(2)} Gold crops per hour (${(v * 100).toFixed(2)}%/min)` },
+  { key: 'rainbowCrop', title: 'Rainbow crops', icon: '🌈', cats: ['RAINBOW granter'], longTerm: true,
+    why: 'Rainbow Granter (every Rainbow pet has it): each pet has its own chance every minute to turn a crop in your garden Rainbow; the chance grows with STR. Leave them out while crops grow (counted without the Strength Crystal, since they stay out for hours).',
+    score: (t) => t.reduce((s, p) => s + abilitySum(p, 'RAINBOW granter'), 0),
+    show: (v) => `≈${(v * 60).toFixed(2)} Rainbow crops per hour (${(v * 100).toFixed(2)}%/min)` },
   { key: 'refund', title: 'Pet refund (selling pets)', icon: '♻️', cats: ['petRefund'],
     why: 'Chance to get an egg back when you sell a pet (the egg it hatched from, per the ability text and the activity log).',
     score: (t) => atLeastOne(t.map((p) => abilitySum(p, 'petRefund'))),
@@ -2576,11 +2804,12 @@ const TEAM_GOALS = [
     score: (t) => t.reduce((s, p) => s + abilitySum(p, 'dust'), 0) / 100 + 1e-4 * atLeastOne(t.map((p) => abilitySum(p, 'petRefund'))),
     show: (v) => `+${(Math.floor(v * 1000 + 1e-6) / 10).toFixed(1)}% dust per pet sold` },
 ];
-function teamGoals() { return TEAM_GOALS.filter((g) => g.key !== 'charge' || settings.featChargeTeam !== false); }
+function teamGoals() { return TEAM_GOALS.filter((g) => (g.key !== 'charge' || settings.featChargeTeam !== false) && (!['goldCrop', 'rainbowCrop'].includes(g.key) || settings.featCropMutTeams !== false)); }
 // Best team for a goal: tries every combination of the pets that help (ties: keep pets that are already out)
 // Ties between equally good pets always go to the older one (more XP), then by id, so picks don't flip between refreshes
 const older = (x, y) => (Number(y.xp) || 0) - (Number(x.xp) || 0) || String(x.id).localeCompare(String(y.id));
-function bestTeam(goal) {
+function bestTeam(goal) { return forGoal(goal, () => bestTeam0(goal)); }
+function bestTeam0(goal) {
   // a pet helps if it adds anything on its own (Crop Refund has no size, only a chance, so abilitySum alone misses it)
   const helps = result.pets.filter((p) => goal.cats.some((c) => abilitySum(p, c) > 0) || goal.score([p]) > 1e-9)
     .sort((a, b) => goal.score([b]) - goal.score([a]) || older(a, b)).slice(0, 40);
@@ -2606,22 +2835,27 @@ function renderTeams(bar, body) {
   // Eggs ready to hatch: the hatching teams and the egg planner go first
   const eggsReady = (game.readPets(settings.gardenOwner)?.eggs ?? []).filter((e) => e.maturedAt && e.maturedAt <= Date.now()).length;
   const HATCH_GOALS = ['maxStr', 'mutation', 'rare'];
-  const goalCard = (g) => {
+  const goalCard = (g) => forGoal(g, () => goalCard0(g));
+  const goalCard0 = (g) => {
     const { team, value } = bestTeam(g);
     const isOut = team.length && team.every((p) => p.loc === 'garden');
     const block = !team.length ? 'You have no pets with these abilities.'
       : !ready.ok ? ready.reason
       : active.length < team.filter((p) => p.loc !== 'garden').length + team.filter((p) => p.loc === 'garden').length
         ? `Put out ${TEAM_SIZE - active.length} more pet${TEAM_SIZE - active.length === 1 ? '' : 's'} (any) first, so there are slots to swap into.` : '';
-    const btn = isOut ? '<span class="chip keep">✔ out now</span>'
-      : `<button data-team="${g.key}" ${block || teamBusy ? 'disabled' : ''} title="${esc(block)}">${teamBusy === g.key ? 'Applying…' : 'Apply'}</button>`;
-    return `<div class="team"><div class="thd"><b>${g.icon} ${esc(g.title)}</b><span class="tval">${team.length ? esc(g.show(value)) : '—'}</span>${btn}</div>
-      <div class="muted why">${esc(g.why)}</div>
-      ${block && !isOut && team.length ? `<div class="warn">${esc(block)}</div>` : ''}${teamMsg[g.key] ? `<div class="muted">${esc(teamMsg[g.key])}</div>` : ''}
-      <div class="tpets">${team.map((p) => `<div class="tpet${p.loc === 'garden' ? ' out' : ''}">${petImg(p, 28)}<div class="tl">${locIcon(p.loc)} <b>${esc(nameOnly(p))}</b> <span class="muted">STR ${teamStr(p)}</span>
-        ${orderAbilities(p.abilities).filter((a) => { const c = String(A_TABLE[a]?.[0] ?? ''); return g.cats.includes(c) || g.cats.includes(c.split(':')[0]); }).map(abilityTag).join('')}
-        <span class="muted">${[...g.cats.map((c) => abilitySum(p, c) > 0 ? catValue(c, abilitySum(p, c)) : ''),
-          p.abilities.includes('ProduceRefund') && g.key === 'sell' ? `${(Math.min(0.99, (A_TABLE.ProduceRefund?.[1] ?? 20) / 100 * teamStr(p) / 100) * 100).toFixed(1)}% crop refund` : ''].filter(Boolean).join(' · ')}</span></div></div>`).join('')}</div></div>`;
+    const btn = isOut ? '<span class="chip keep">✔ out</span>'
+      : `<button class="tapply" data-team="${g.key}" ${block || teamBusy ? 'disabled' : ''} title="${esc(block)}">${teamBusy === g.key ? 'Applying…' : 'Apply'}</button>`;
+    // One line per pet: what it adds to this job; the long explanation is in the title's hover text (ⓘ)
+    const petVal = (p) => g.key === 'charge' ? '' : [...g.cats.map((c) => abilitySum(p, c) > 0 ? catValue(c, abilitySum(p, c)) : ''),
+      p.abilities.includes('ProduceRefund') && g.key === 'sell' ? `${(Math.min(0.99, (A_TABLE.ProduceRefund?.[1] ?? 20) / 100 * teamStr(p) / 100) * 100).toFixed(1)}% refund` : ''].filter(Boolean).join(' · ');
+    const forJob = (p) => orderAbilities(p.abilities).filter((a) => { const c = String(A_TABLE[a]?.[0] ?? ''); return g.cats.includes(c) || g.cats.includes(c.split(':')[0]); });
+    // ability badges only when the team mixes abilities (otherwise the card's title already says which one)
+    const mixed = new Set(team.flatMap(forJob)).size > 1;
+    const tags = (p) => (mixed ? forJob(p).map(abilityTag).join('') : '');
+    return `<div class="team${isOut ? ' isout' : ''}"><div class="thd"><b title="${esc(g.why)}">${g.icon} ${esc(g.title)} <span class="info">ⓘ</span></b>${btn}</div>
+      <div class="tsub"><span class="tval">${team.length ? esc(g.show(value)) : '—'}</span>${teamMsg[g.key] ? `<span class="muted"> · ${esc(teamMsg[g.key])}</span>` : ''}</div>
+      ${block && !isOut && team.length ? `<div class="warn">${esc(block)}</div>` : ''}
+      <div class="tpets">${team.map((p) => `<div class="tpet${p.loc === 'garden' ? ' out' : ''}">${petImg(p, 22)}${locIcon(p.loc)}<b class="tn">${esc(nameOnly(p))}</b><span class="muted ts">STR ${teamStr(p)}</span><span class="tt">${tags(p)}</span><span class="muted tv">${esc(petVal(p))}</span></div>`).join('')}</div></div>`;
   };
   // Pets in your Useless list: the pet refund / pet dust teams (the ones for selling pets) also go to the top
   const toSell = result.useless?.length ?? 0;
@@ -2663,7 +2897,7 @@ function levelUpPlan() {
       if ((p.curStr ?? 0) >= (p.baseStr ?? 0)) continue;
       // how much of the team's (fully grown) value this pet still has to gain
       const ids = new Set(team.filter((q) => q !== p).map((q) => q.id));
-      const now = withStr(ids, () => g.score(team));
+      const now = forGoal(g, () => withStr(ids, () => g.score(team)));
       const gain = Math.max(0, (value - now) / value);
       const w = want.get(p) ?? { goals: [], gain: 0 };
       w.goals.push(g); w.gain += gain; want.set(p, w);
@@ -2771,12 +3005,24 @@ function renderLevelUp() {
   const block = !ready.ok ? ready.reason : active.length < plan.team.length ? `Put out ${plan.team.length - active.length} more pet${plan.team.length - active.length === 1 ? '' : 's'} (any) first, so there are slots to swap into.` : '';
   const btn = isOut ? '<span class="chip keep">✔ out now</span>' : `<button data-team="levelup" ${block || teamBusy ? 'disabled' : ''} title="${esc(block)}">${teamBusy === 'levelup' ? 'Applying…' : 'Apply'}</button>`;
   const fedTxt = (p) => { const f = plan.fed(p); return f >= 0.995 ? '' : ` · fed ${Math.round(f * 100)}%`; };
-  // Time to max level with this team: base 60 XP/min plus the booster's XP/min, only while fed
+  // An XP Crystal out: active pets gain their own XP 10% faster until its time runs out (the game's "XP rate"
+  // multiplier, 1.1). Players' tests show it doesn't boost XP Boost abilities, and the game adds XP Potions' 20,000 XP
+  // as is, so only the pets' own XP (60 a minute while fed) is counted ×1.1.
+  const xpCrystalSec = Math.max(0, Number(game.readPets(settings.gardenOwner)?.xpCrystal) || 0);
+  const XP_CRYSTAL = 1.1;
+  const boostOf = () => (plan.layout === 'booster' && plan.booster ? abilitySum(plan.booster, 'xp') * plan.fed(plan.booster) : 0);
+  // the extra XP a minute the crystal adds to the team: 10% of the growing pets' own XP
+  const crystalExtra = xpCrystalSec > 0 ? (XP_CRYSTAL - 1) * plan.team.filter((p) => plan.queue.some((x) => x.p === p)).reduce((t, p) => t + 60 * plan.fed(p), 0) : 0;
+  // Time to max level with this team: base 60 XP/min plus the booster's XP/min, only while fed; the pet's own XP ×1.1
+  // while the XP Crystal lasts, then the normal rate
   const etaTxt = (p) => {
     const left = xpLeftHours(p) * 3600; if (!(left > 0)) return '';
-    const boost = plan.layout === 'booster' && plan.booster ? abilitySum(plan.booster, 'xp') * plan.fed(plan.booster) : 0;
-    const perMin = Math.max(0.01, 60 * plan.fed(p) + boost); // own XP only while fed; the booster's XP even when starving
-    const h = left / perMin / 60, at = new Date(Date.now() + h * 3600000);
+    const boost = boostOf();
+    const own = 60 * plan.fed(p); // own XP only while fed; the booster's XP even when starving
+    const perMin = Math.max(0.01, own + boost), fastMin = Math.max(0.01, own * XP_CRYSTAL + boost);
+    const crystalMin = xpCrystalSec / 60, boostedXp = fastMin * crystalMin;
+    const minutes = left <= boostedXp ? left / fastMin : crystalMin + (left - boostedXp) / perMin;
+    const h = minutes / 60, at = new Date(Date.now() + h * 3600000);
     const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const when = h < 20 ? time : h < 144 ? `${at.toLocaleDateString([], { weekday: 'short' })} ${time}` : at.toLocaleDateString([], { month: 'short', day: 'numeric' });
     return ` · max in ${h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : dur(h)} (~${when})`;
@@ -2789,11 +3035,10 @@ function renderLevelUp() {
     : plan.booster ? `${n[1][0].toUpperCase()}${n[1].slice(1)} pets growing (${Math.round(plan.twoTrainees)} XP/min) beats your best XP booster with ${n[0]} (${Math.round(plan.withBooster)} XP/min).`
       : plan.selfFed ? 'The three pets that gain the most per hour of growing.' : 'A hunger manager plus the two pets that gain the most per hour of growing.';
   const feedNote = plan.selfFed ? 'No feeder: you feed all three yourself, so every slot grows.' : `Counts only the time they stay fed (you feed the hunger pet).${plan.hunger ? '' : ' You have no hunger pet, so feed them by hand.'}`;
-  return `<div class="team wide"><div class="thd"><b>📈 Level up</b><span class="tval">${Math.round(plan.xpMin)} XP/min into pets that need it</span>${btn}</div>
-    <div class="muted">Grows the pets your best teams would use once fully grown. ${esc(feedNote)} ${esc(why)}</div>
+  return `<div class="team wide${isOut ? ' isout' : ''}"><div class="thd"><b title="${esc(`Grows the pets your best teams would use once fully grown. ${feedNote} ${why}`)}">📈 Level up <span class="info">ⓘ</span></b>${btn}</div>
+    <div class="tsub"><span class="tval">${Math.round(plan.xpMin + crystalExtra)} XP/min into pets that need it</span>${xpCrystalSec > 0 ? `<span class="muted" title="The XP Crystal makes active pets gain their own XP 10% faster (not XP Boost abilities or XP Potions); the times to max level count it until it runs out"> · XP Crystal: +10% on the pets' own XP (${dur(xpCrystalSec / 3600)} left)</span>` : ''}</div>
     ${block && !isOut ? `<div class="warn">${esc(block)}</div>` : ''}${teamMsg.levelup ? `<div class="muted">${esc(teamMsg.levelup)}</div>` : ''}
-    <div class="tpets">${plan.team.map((p) => `<div class="tpet${p.loc === 'garden' ? ' out' : ''}">${petImg(p, 36)}<div><div>${locIcon(p.loc)} <b>${esc(nameOnly(p))}</b> <span class="muted">${strCell(p)}</span></div>
-      <div>${abilityTags(p)}</div><div class="muted">${esc(roleOf(p))}</div></div></div>`).join('')}</div>
+    <div class="tpets">${plan.team.map((p) => `<div class="tpet${p.loc === 'garden' ? ' out' : ''}">${petImg(p, 26)}<div class="tl">${locIcon(p.loc)}<b>${esc(nameOnly(p))}</b><span class="muted">${strCell(p)}</span><span class="tt">${abilityTags(p)}</span><span class="muted">${esc(roleOf(p))}</span></div></div>`).join('')}</div>
     <div class="lvlprio"><span class="muted">Team:</span>
       <select data-f="levelFeeder" title="Who keeps the team fed"><option value="pet" ${settings.levelFeeder !== 'self' ? 'selected' : ''}>with a hunger pet</option><option value="self" ${settings.levelFeeder === 'self' ? 'selected' : ''}>no feeder (I feed them)</option></select>
       <span class="muted">Grow first:</span>
@@ -2908,7 +3153,7 @@ function renderJournalPlan() {
     const best = g ? bestTeam(g) : null;
     const isOut = best?.team.length && best.team.every((p) => p.loc === 'garden');
     const entry = (m) => `<span class="tag${m.have ? ' have' : ''}" title="${m.have ? 'You already own one: log it (📖 Journal tab)' : 'Not owned yet: hatch it'}">${esc(pretty(m.sp))} ${esc(m.v)}${m.have ? ' ✓ owned' : ''}</span>`;
-    const pick = !e.missing.length ? '<span class="muted">Journal done for this egg: hatch with whatever team you like (🌈 for Gold/Rainbow dust).</span>'
+    const pick = !e.missing.length ? '<span class="muted">Journal done for this egg: hatch with whatever team you like (🧬 for Gold/Rainbow dust).</span>'
       : !e.toHatch.length ? '<span class="muted">Nothing to hatch: log the pets you already own.</span>'
       : !g ? '<span class="muted">Only new species left: they come on their own (species pity), so any team.</span>'
       : `<b>${g.icon} ${esc(g.title)}</b> <span class="muted">for ${esc(pretty(e.hardest.sp))} ${esc(e.hardest.kind.why)}</span> ${isOut ? '<span class="chip keep">✔ out now</span>' : `<button data-team="${g.key}" ${teamBusy || !net.readiness().ok ? 'disabled' : ''}>Apply</button>`}${e.later.length ? `<div class="muted">then: ${e.later.map((k) => goalOf(k).icon + ' ' + esc(goalOf(k).title)).join(' → ')}</div>` : ''}`;
@@ -2916,8 +3161,7 @@ function renderJournalPlan() {
     const field = (e.ready ? `<div><span class="chip keep">${e.ready} ready to hatch</span></div>` : '') + (e.growing ? `<div class="muted">${e.growing} growing · next in ${dur(e.nextAt - Date.now())}</div>` : '');
     return `<tr${e.ready ? ' class="ready"' : ''}><td><b>${esc(e.name)}</b>${field}</td><td>${e.missing.length ? e.missing.sort((a, b) => a.have - b.have).map(entry).join('') : '<span class="muted">All logged</span>'}</td><td>${pick}</td></tr>`;
   }).join('');
-  return `<div class="team wide"><div class="thd"><b>📖 Which team for each egg (journal)</b></div>
-    <div class="muted">Go in order: Max Weight → 💪 (you'll stumble on Gold/Rainbow while hunting size, not the other way round), then Gold, then Rainbow → 🌈. New species need no team: the species pity brings them on its own. Double Hatch helps all of them. Entries you already own just need logging (📖 Journal tab). Eggs ready to hatch in your garden are listed first.</div>
+  return `<div class="team wide"><div class="thd"><b title="Go in order: Max Weight → 💪 (you'll stumble on Gold/Rainbow while hunting size, not the other way round), then Gold, then Rainbow → 🧬. New species need no team: the species pity brings them on its own. Double Hatch helps all of them. Entries you already own just need logging (📖 Journal tab). Eggs ready to hatch in your garden are listed first.">📖 Which team for each egg (journal) <span class="info">ⓘ</span></b></div>
     ${rows ? `<table class="jplan"><tr><th>Egg</th><th>Not in your journal yet</th><th>Hatch with</th></tr>${rows}</table>` : '<div class="note ok">Every egg\'s pets are fully logged.</div>'}</div>`;
 }
 
@@ -3014,6 +3258,7 @@ function renderSettings(bar, body) {
       ${chk('featEggPlan', '📖 Which team for each egg (Teams tab)')}
       ${chk('keepAwake', '💤 Keep the game running in the background (unfocused or hidden tab)')}${settings.keepAwake !== false && keepAwake.othersHandleIt() ? ' <span class="muted">(another mod is already doing this, so this one stays off)</span>' : ''}
       ${chk('featChargeTeam', '🌩️ Charge & capture team (Teams tab)')}
+      ${chk('featCropMutTeams', '🟡 Gold crops and 🌈 Rainbow crops teams (Teams tab)')}
       ${chk('featTeamsOrder', 'Teams tab puts what\'s due first (hatching / selling / growing)')}
       ${chk('featSellFix', 'Sell dialog: swap in the selling team')}
       ${chk('featJoin5', '👥 "5-player room" button (joins a public room with 5 players, so you make it full)')}
@@ -3022,13 +3267,21 @@ function renderSettings(bar, body) {
       ${chk('harvestTeamWarn', '🧺 Ask before harvesting a Gold/Rainbow celestial crop without Double Harvest pets out')}
       ${chk('featHatchFix', '🥚 Hatch pop-up: swap in a hatching team')}
       ${chk('featCrystalPlace', '💎 Offer to put the Strength Crystal out')}
+      ${chk('crystalIdleWarn', '💎 Warn when the Strength Crystal is out with no hatching or pet selling, and offer to pick it up')} ${num('crystalIdleMin', 'after (minutes)', 1)}
       ${chk('featLogging', '📖 Log buttons (needs a Camera)')}
       ${chk('featMountHint', '🐎 Riding a Thundercharger / Capture pet: show what it would do where you stand')}
       ${chk('featPlantHint', '🌱 Missing journal entries above the plant card (when you stand on a plant; right-click the plant picture to toggle)')}
+      ${chk('plantHintPets', '🐾 …and which of your pets eat that crop (the 🐾 button on it switches this too)')}
       ${chk('featCropJournal', '🌱 Crop journal filters')}
+      ${chk('featGardenSearch', '🔍 Garden search button (fades what doesn\'t match; 📖 shows plants whose crop still has journal entries missing)')}
+      ${chk('featCleanseAll', '🧼 Holding a Crop Cleanser on a plant: a button cleanses every crop on it with exactly the same weather mutations as the one you\'re on (two clicks; preserved crops and ones not in your journal yet are left alone)')}
+      ${chk('featBestSpot', '🎯 …and Best spot in its Filters: where to stand, riding the pet, for the most Dawn Capture / Amber Capture / Thundercharger')}
+      ${chk('bestSpotRide', '🎯 Riding a Dawn Capture / Amber Capture / Thundercharger pet: mark its best spot by itself')}
+      ${chk('bestSpotKeepRare', '🎯 Amber Capture: never pick a spot that takes Amber off a tile of only rare crops (Purple Daisy, Four-Leaf Clover, Double Snowdrop, Variegated Cattail, Embercrown, Witchfire)')}
       ${chk('featSeedButtons', '🌱 "Get seeds" from the Seed Silo')}
       ${settings.buyOff?.length ? `<div><button class="mini" data-a="buyallon">🛒 Switch all ${settings.buyOff.length} switched-off Buy items back on</button></div>` : ''}
-      ${chk('featTabOrder', 'Drag tabs to reorder them')} ${settings.tabOrder?.length ? '<button class="mini" data-a="tabreset">Default tab order</button>' : ''}</details>
+      ${chk('featTabOrder', 'Drag tabs to reorder them')} ${settings.tabOrder?.length ? '<button class="mini" data-a="tabreset">Default tab order</button>' : ''}
+      <div>${chk('featUpdateCheck', '<span title="Every 6 hours the mod reads the version number of its file on GitHub. It sends nothing about you or the game.">⬆ Tell me when there\'s a new version</span>')} <button class="mini" data-a="updcheck">Check now</button> <span class="muted updst"></span></div></details>
     <details data-sec="hatch"${secOpen('hatch')}><summary><b>Hatching and selling</b></summary>
       ${chk('crystalBlock', "Stop a hatch if the Strength Crystal isn't out")}
       ${chk('idleBlock', "Stop a hatch if pets out don't help hatching")}
@@ -3053,6 +3306,7 @@ function renderSettings(bar, body) {
       ${sel('rareAlertEvery', '🔁 Repeating alerts ring every', [['10', '10 s'], ['15', '15 s'], ['30', '30 s'], ['60', '1 min']])} <span class="muted">until bought or stopped; only these go to your phone (📱 Phone remote)</span>
       ${chk('rareAlertSound', 'Chime')} <label>volume <input type="range" min="0" max="100" step="5" data-f="rareAlertVolume" value="${Number(settings.rareAlertVolume ?? 60)}" style="width:110px"></label> <button class="mini" data-a="chimetest">▶ Test</button> ${chk('rareAlertDesktop', 'System notification (works with the tab in the background)')}
       ${chk('storeOnlyKept', 'Put purchases away only if that item is already in its storage (Seed Silo / Tool Shack / Decor Shed); others stay in the inventory')}
+      ${chk('buyPinToPouch', '🧰 Bag full: pin stacks that stay in the bag anyway (eggs, or seeds / tools / decor with no room in a storage) to empty Tool Pouch slots to make room. Your own pins are never replaced')}
       <div class="muted">Never bought: buildings, one-time items, other Magic Dust items.</div>
       ${list('noLocalStock', 'No local stock:')}</details>
     <details data-sec="display"${secOpen('display')}><summary><b>Buttons and display</b></summary>
@@ -3081,7 +3335,7 @@ function renderSettings(bar, body) {
 
 function onChange(e) {
   const t = e.target;
-  if (t.dataset.sel) { t.checked ? selected.add(t.dataset.sel) : selected.delete(t.dataset.sel); render(); return; }
+  if (t.dataset.sel) { t.checked ? selected.add(t.dataset.sel) : selected.delete(t.dataset.sel); ticksChanged(); return; }
   if (t.dataset.f) {
     const k = t.dataset.f;
     settings[k] = t.type === 'checkbox' ? t.checked : t.type === 'number' || t.type === 'range' ? Math.max(0, +t.value || 0) : (t.value || null);
@@ -3148,14 +3402,19 @@ function onClick(e) {
   if (a === 'close') document.getElementById(ID).classList.remove('open');
   if (a === 'refresh') { analyze(); render(); }
   if (a === 'join5') { if (e.isTrusted || TEST_BUILD) joinFivePlayerRoom(b); return; }
-  if (a === 'all') { result.useless.filter((p) => !sellBlock(p)).forEach((p) => selected.add(p.id)); render(); }
-  if (a === 'none') { selected.clear(); render(); }
+  if (a === 'all') { result.useless.filter((p) => !sellBlock(p)).forEach((p) => selected.add(p.id)); ticksChanged(); }
+  if (a === 'none') { selected.clear(); ticksChanged(); }
   if (a === 'setcopy') { copySettings(b); return; }
   if (a === 'setimport') { importSettings(); return; }
   if (a === 'buyallon') { settings.buyOff = []; saveSettings(); render(); updateShopFab(); return; }
   if (a === 'fabreset') { store.set('fabPos', null); setFabPos(fabPos(), false); avoidOtherButtons(); render(); return; }
   if (a === 'tabreset') { settings.tabOrder = []; saveSettings(); render(); return; }
   if (a === 'chimetest') { chime(); return; }
+  if (a === 'updcheck') {
+    const st = b.parentElement?.querySelector('.updst'); if (st) st.textContent = 'Checking…';
+    checkForUpdate(true).then((r) => { if (st) st.textContent = r.error ? `Couldn't read the GitHub file (${r.error}).` : r.newer ? `v${r.latest} is available (you have v${MOD_VERSION}).` : `Up to date: GitHub has v${r.latest}, you have v${MOD_VERSION}.`; });
+    return;
+  }
   if (a === 'remotenew') { remoteRetire(); settings.remoteCode = relay.newCode(); saveSettings(); setTimeout(() => { remoteRestart(); render(); }, 1500); render(); return; }
   if (a === 'remotesharecopy' && REMOTE_POOLS) { const link = remoteShareLink(); if (!link) return; try { navigator.clipboard.writeText(link); toast('Buy-only link copied: whoever opens it can press Buy on this PC while sharing is on, and see what\'s to buy here.', { key: 'remote', ms: 7000 }); } catch { prompt('Buy-only link:', link); } return; }
   if (a === 'remotecopy') { const link = remotePageLink(); try { navigator.clipboard.writeText(link); toast('Phone link copied: open it on your phone (send it to yourself, or type it in).', { key: 'remote', ms: 6000 }); } catch { prompt('Phone link:', link); } return; }
@@ -3199,7 +3458,7 @@ async function unlockPet(id, btn) {
 // Shop state, PurchaseShopItem shape and per-player weather stock follow QPM's shop code (store/shopStock*.ts);
 // the viewMode field and the Tool/Decor mix in the tool shop come from Arie's mg-afk-android (GameActions.kt).
 // Only ever runs when you press the button and confirm (never on a timer or a restock), and stops at the first problem.
-const SHOP_NAMES = { seed: '🌱 Seeds', egg: '🥚 Eggs', tool: '🔧 Tools', decor: '🪑 Decor', dawn: '🌅 Dawn', snow: '❄️ Snow', thunder: '⚡ Thunder', amber: '🟠 Amber' };
+const SHOP_NAMES = { seed: '🌱 Seeds', egg: '🥚 Eggs', tool: '🔧 Tools', decor: '🪑 Decor', dawn: '🌅 Dawn', snow: '❄️ Snow', thunder: '⚡ Thunder', amber: '🟠 Amber', spooky: '🎃 Spooky' };
 let shopBusy = false;
 let lastBuyResult = null; // { at, text } of the last Buy everything run (shown to the phone remote)
 let onRareRing = null; // set by the phone remote: also sends rare alerts to the phone
@@ -3254,8 +3513,10 @@ function renderShop(bar, body) {
   bar.innerHTML = `<span class="grow"><b>${inStock.length}</b> items in stock across ${shops.length} shops, weather shops included (${units} units). Buildings, one-time purchases and anything costing Magic Dust are skipped. Bought items go into your Seed Silo / Tool Shack / Decor Shed when you have one.</span>
     <button data-a="buymenu" title="Choose, for every item in the game, whether Buy everything buys it">🛒 Choose items…</button>
     <button data-a="shopbuy" ${block || shopBusy ? 'disabled' : ''} title="${esc(block)}">🛒 Buy everything…</button>`;
-  body.innerHTML = `<div class="teams">${shops.map((sh) => `<div class="team"><div class="thd"><b>${esc(shopLabel(sh.key))}</b><span class="tval">${sh.closed ? '<span class="muted">closed</span>' : `${sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).length} to buy`}</span>${sh.restockIn ? `<span class="muted">restocks in ${dur(sh.restockIn)}</span>` : ''}</div>
-    <div class="shopitems">${shopCatalog(sh).map((i) => `<span class="tag${i.left && !shopSkip(i) && !isBuyOff(sh.key, i.id) ? '' : ' have'}${shopSkip(i) ? '' : ' buytog'}"${shopSkip(i) ? '' : ` data-buyoff="${esc(buyOffKey(sh.key, i.id))}"`} title="${shopSkip(i) ? 'Never bought by Buy everything' : `${i.absent ? 'Not in stock now' : `${i.left} of ${i.stock} left`} · click to switch ${isBuyOff(sh.key, i.id) ? 'it back on' : 'it off'} for Buy everything`}">${shopImg(i, 18)} ${esc(pretty(i.name))} ${i.absent ? '' : `<b>×${i.left}</b>`}${shopSkip(i) ? ' · ' + SKIP_LABEL[shopSkip(i)] : isBuyOff(sh.key, i.id) ? ' · ⏸ switched off' : i.absent ? ' · not in stock now' : i.price ? ` · ${i.price.toLocaleString()}🪙` : ''}${settings.featRareAlert === false ? '' : ` ${alertBell(i)}`}</span>`).join('') || `<span class="muted">${sh.closed ? (sh.key === 'spooky' ? 'Closed: the Spooky shop is only open at night (30 minutes every 10 hours)' : 'Closed right now: nothing for sale') : 'Empty'}</span>`}</div></div>`).join('')}</div>`;
+  // after the Haunt Event the Spooky shop is gone (unless the game opens it again)
+  const shown = shops.filter((sh) => !(sh.key === 'spooky' && sh.closed && spookyOver()));
+  body.innerHTML = `<div class="teams">${shown.map((sh) => `<div class="team"><div class="thd"><b>${esc(shopLabel(sh.key))}</b><span class="tval">${sh.closed ? '<span class="muted">closed</span>' : `${sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).length} to buy`}</span>${sh.restockIn ? `<span class="muted">restocks in ${dur(sh.restockIn)}</span>` : ''}</div>
+    <div class="shopitems">${shopCatalog(sh).map((i) => `<span class="tag${i.left && !shopSkip(i) && !isBuyOff(sh.key, i.id) ? '' : ' have'}${shopSkip(i) ? '' : ' buytog'}"${shopSkip(i) ? '' : ` data-buyoff="${esc(buyOffKey(sh.key, i.id))}"`} title="${shopSkip(i) ? 'Never bought by Buy everything' : `${i.absent ? 'Not in stock now' : `${i.left} of ${i.stock} left`} · click to switch ${isBuyOff(sh.key, i.id) ? 'it back on' : 'it off'} for Buy everything`}">${shopImg(i, 18)} ${esc(pretty(i.name))} ${i.absent ? '' : `<b>×${i.left}</b>`}${shopSkip(i) ? ' · ' + SKIP_LABEL[shopSkip(i)] : isBuyOff(sh.key, i.id) ? ' · ⏸ switched off' : i.absent ? ' · not in stock now' : i.price ? ` · ${i.price.toLocaleString()}🪙` : ''}${settings.featRareAlert === false ? '' : ` ${alertBell(i)}`}</span>`).join('') || `<span class="muted">${sh.closed ? (sh.key === 'spooky' ? 'Closed: the Spooky shop is only open at night (every 4 hours) until the Haunt Event ends on ' + new Date(SPOOKY_ENDS).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Closed right now: nothing for sale') : 'Empty'}</span>`}</div></div>`).join('')}</div>`;
 }
 const STORAGE_FOR = { Seed: 'SeedSilo', Tool: 'ToolShack', Decor: 'DecorShed' };
 // What "Buy everything" never buys (built-in, from the game data of 2026-09-30; live data adds new ones):
@@ -3283,11 +3544,17 @@ function shopMeta(i) {
   return m ? { coinPrice: m.coinPrice, max: m.maxInventoryQuantity } : null;
 }
 // How many more of this item you can carry (Infinity when there's no limit or it isn't known)
+// Tools: what's in the Tool Shack counts too, so the total stays within one stack the shack can hold (e.g. 99 Watering
+// Cans): more would just be left over in the inventory.
 function roomFor(i, inv = game.readStorage(settings.gardenOwner)) {
   const max = Number(shopMeta(i)?.max) || CARRY_MAX[i.id] || 0;
   if (!max) return Infinity;
-  const have = inv.items.filter((x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType)).reduce((t, x) => t + (Number(x.quantity) || 1), 0);
-  return Math.max(0, max - have);
+  const same = (x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType);
+  const qty = (list) => (list ?? []).filter(same).reduce((t, x) => t + (Number(x.quantity) || 1), 0);
+  const have = qty(inv.items);
+  const sid = STORAGE_FOR[i.itemType];
+  const stored = i.itemType === 'Tool' && sid && inv.storages?.includes(sid) ? qty(inv.storageItems?.[sid]) : 0;
+  return Math.max(0, max - have - stored);
 }
 // Magic Dust price of an item (0 if it's bought with coins)
 function dustCost(i) {
@@ -3308,15 +3575,39 @@ function explainRefusal(i, code) {
   const stack = inv.items.find((x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType));
   const max = Number(meta?.max) || CARRY_MAX[i.id] || 0;
   if (stack && max && (Number(stack.quantity) || 1) >= max) return null; // at its carry limit: obvious, not reported
-  if (!stack && inv.items.length >= INVENTORY_SLOTS) return `inventory full (${inv.items.length}/${INVENTORY_SLOTS} slots) and you have no stack of it yet`;
+  if (!stack && inv.used >= INVENTORY_SLOTS) return `inventory full (${inv.used}/${INVENTORY_SLOTS} slots) and you have no stack of it yet`;
   return `the game refused it ("${code}") without saying why; it isn't coins, stock, inventory space or a carry limit`;
 }
+// 🧰 Bag stacks Buy everything may pin to an empty Tool Pouch slot when the bag has no free slot for a new item: stacks
+// of eggs, seeds, tools or decor (never pets, crops or potted plants) that stay in the bag anyway (eggs have no storage;
+// seeds / tools / decor only when you have no storage for them, or it can't take them). Kinds this buy is buying come
+// first, then the biggest stacks. Your own pins are never replaced: only empty pouch slots are used.
+const stackName = (x) => { const k = stackKind(x), u = (o) => unwrapLive(o)?.[k]; return (x.itemType === 'Seed' ? u(liveData?.plants)?.seed?.name : x.itemType === 'Egg' ? u(liveData?.eggs)?.name : x.itemType === 'Decor' ? u(liveData?.decors)?.name : u(liveData?.items)?.name) || pretty(k); };
+function pouchCandidates(inv, buying = []) {
+  if (settings.buyPinToPouch === false || !(inv.pouchFree > 0)) return [];
+  const want = new Set(buying.map((i) => i.itemType + ':' + i.id));
+  const stays = (x) => {
+    if (x.itemType === 'Egg') return true;
+    const sid = STORAGE_FOR[x.itemType], k = STACK_KEY[x.itemType];
+    if (!sid || !k || !inv.storages.includes(sid)) return true;
+    const inStore = (inv.storageItems?.[sid] ?? []).some((y) => y[k] === x[k]);
+    if (settings.storeOnlyKept && !inStore) return true;
+    if (!inStore && (inv.storageFree?.[sid] ?? Infinity) <= 0) return true;
+    return storageFullFor({ itemType: x.itemType, idField: k, id: x[k] }, inv);
+  };
+  const wanted = (x) => (want.has(x.itemType + ':' + stackKind(x)) ? 1 : 0);
+  return inv.items.filter((x) => x && !('id' in x) && POUCH_STACK_TYPES.has(x.itemType) && stackKind(x) && x.remainingActiveSeconds == null && !isPinnedStack(inv.pins, x) && stays(x))
+    .sort((a, b) => wanted(b) - wanted(a) || (Number(b.quantity) || 1) - (Number(a.quantity) || 1))
+    .slice(0, inv.pouchFree);
+}
 // Before buying: trim the list to what your coins, dust and free inventory slots can actually take, in list order,
-// so nothing is sent that the game would refuse for those reasons. Returns the trimmed items and what was cut and why.
+// so nothing is sent that the game would refuse for those reasons. Returns the trimmed items, what was cut and why,
+// and the bag stacks to pin to the Tool Pouch first to make room (pins), if the bag is short of slots.
 function preflight(items, inv = game.readStorage(settings.gardenOwner)) {
   inv = { ...inv, storageFree: { ...(inv.storageFree ?? {}) } };
   let coins = inv.coins, dust = inv.dust;
-  let freeSlots = INVENTORY_SLOTS - inv.items.length;
+  let freeSlots = INVENTORY_SLOTS - inv.used; // 🧰 stacks in the Tool Pouch don't use a slot
+  const canPin = pouchCandidates(inv, items), pins = [];
   const short = [];
   const out = [];
   for (const i of items) {
@@ -3326,7 +3617,9 @@ function preflight(items, inv = game.readStorage(settings.gardenOwner)) {
     const sid = STORAGE_FOR[i.itemType], inStore = (inv.storageItems?.[sid] ?? []).some((x) => x[i.idField] === i.id);
     const storeFree = inv.storageFree ?? {};
     const putAway = inv.storages.includes(sid) && (inStore || (!settings.storeOnlyKept && (storeFree[sid] ?? Infinity) > 0));
-    if (!hasStack && freeSlots < 1) { short.push({ i, n: i.left, why: 'no free inventory slot' }); continue; }
+    // no free slot: one is made by pinning a stack to an empty Tool Pouch slot, while there are ones to pin
+    const needsPin = !hasStack && freeSlots < 1;
+    if (needsPin && pins.length >= canPin.length) { short.push({ i, n: i.left, why: 'no free inventory slot' }); continue; }
     const price = Number(shopMeta(i)?.coinPrice) || i.price || 0; // 0 = price unknown: left for the game to decide
     const dPrice = dustCost(i);
     let n = i.left;
@@ -3334,12 +3627,13 @@ function preflight(items, inv = game.readStorage(settings.gardenOwner)) {
     if (dPrice) n = Math.min(n, Math.floor(dust / dPrice));
     if (n < i.left) short.push({ i, n: i.left - n, why: dPrice && Math.floor(dust / dPrice) < i.left ? 'not enough Magic Dust' : 'not enough coins' });
     if (n <= 0) continue;
+    if (needsPin) { pins.push(canPin[pins.length]); freeSlots++; }
     coins -= n * price; dust -= n * dPrice;
     if (!hasStack && !putAway) freeSlots--;
     if (!hasStack && putAway && !inStore && storeFree[sid] != null) storeFree[sid]--;
     out.push({ ...i, left: n });
   }
-  return { items: out, short };
+  return { items: out, short, pins };
 }
 function shopSkip(i) {
   if (i.itemType === 'Seed' && i.shop === 'seed' && noLocalStock().has(i.id)) return 'nolocal';
@@ -3371,6 +3665,8 @@ function storageFullFor(i, inv = game.readStorage(settings.gardenOwner)) {
   const k = storeFull.get(i.itemType + ':' + i.id);
   return !!k && k === storageSig(inv, sid);
 }
+// Is this stack (by uuid, or by what it is for stacks without one) still in the inventory?
+const inInventory = (stackId) => game.readStorage(settings.gardenOwner).items.some((x) => (x.id ?? x.species ?? x.toolId ?? x.decorId) === stackId);
 async function storeItem(i, tally, waitMs = 1500) {
   const storageId = STORAGE_FOR[i.itemType];
   if (!storageId) return; // eggs etc. just stay in the inventory
@@ -3382,12 +3678,16 @@ async function storeItem(i, tally, waitMs = 1500) {
   for (const x of stacks) {
     const stackId = x.id ?? x.species ?? x.toolId ?? x.decorId; // stacks without a uuid go by what they are
     if (!stackId) continue;
+    // 🧰 pinned in the Tool Pouch: it stays in the bag, where the pouch takes it from
+    if (isPinnedStack(inv.pins, x)) { (tally.full ??= new Map()).set(pretty(i.name), 'it\'s in your Tool Pouch, so it stays with you'); continue; }
     if (!inv.storages.includes(storageId)) { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `no ${storageId} found (storages seen: ${inv.storages.join(', ') || 'none'})`); continue; }
     const full = `${pretty(storageId)} is full for it; it stays in your inventory`;
     if (storageFullFor(i, inv)) { (tally.full ??= new Map()).set(pretty(i.name), full); continue; }
     if (settings.storeOnlyKept && !(inv.storageItems?.[storageId] ?? []).some((y) => y[i.idField] === i.id)) { (tally.full ??= new Map()).set(pretty(i.name), `not in your ${pretty(storageId)} yet; it stays in your inventory`); continue; }
+    // Another mod may have put it away first (Garden Companion's auto-store tops up stacks the storage already has)
+    if (!inInventory(stackId)) { tally.moved++; continue; }
     const r = await storageMove(stackId, 'inventory', storageId);
-    if (r.ok) tally.moved++;
+    if (r.ok || !inInventory(stackId)) tally.moved++;
     else if (r.code === 'rejected') { storeFull.set(i.itemType + ':' + i.id, storageSig(game.readStorage(settings.gardenOwner), storageId)); (tally.full ??= new Map()).set(pretty(i.name), full); }
     else { tally.kept++; (tally.why ??= new Map()).set(pretty(i.name), `the game said "${r.reason || r.code}"`); }
   }
@@ -3400,6 +3700,7 @@ function leftoverStacks(inv = game.readStorage(settings.gardenOwner)) {
     const sid = STORAGE_FOR[x.itemType], k = STACK_KEY[x.itemType];
     if (!sid || !k || !x[k] || !inv.storages.includes(sid)) return false;
     if (x.itemType === 'Tool' && (x.remainingActiveSeconds != null || (typeof x.id === 'string' && x.id))) return false;
+    if (isPinnedStack(inv.pins, x)) return false; // 🧰 in the Tool Pouch: stays in the bag
     if (storageFullFor({ itemType: x.itemType, idField: k, id: x[k] }, inv)) return false;
     return (inv.storageItems?.[sid] ?? []).some((y) => y[k] === x[k]);
   });
@@ -3408,8 +3709,9 @@ async function putAwayLeftovers() {
   let moved = 0, kept = 0, why = null;
   for (const x of leftoverStacks()) {
     const k = STACK_KEY[x.itemType];
+    if (!inInventory(x.id ?? x[k])) { moved++; continue; } // put away meanwhile (e.g. by Garden Companion's auto-store)
     const r = await storageMove(x.id ?? x[k], 'inventory', STORAGE_FOR[x.itemType]);
-    if (r.ok) moved++; else { kept++; why = r.reason || r.code; }
+    if (r.ok || !inInventory(x.id ?? x[k])) moved++; else { kept++; why = r.reason || r.code; }
   }
   return { moved, kept, why };
 }
@@ -3455,6 +3757,7 @@ function shopRulesText() {
     `Buildings, one-time items (Shovel, Camera, …) and ${settings.buyPotions ? 'other ' : ''}Magic Dust items are never bought.`,
     'Click an item to switch it off (greyed out, not bought) or back on; this is remembered across restocks.',
     'Your coins, dust and free inventory slots are checked first; anything that won\'t fit is listed and not sent.',
+    settings.buyPinToPouch !== false ? 'If your bag is full, stacks that stay in it anyway (eggs, or seeds / tools / decor with no room in a storage) are pinned to empty Tool Pouch slots first to make room; your own pins are never replaced.' : '',
     settings.storeOnlyKept ? 'Each item goes into your Seed Silo / Tool Shack / Decor Shed as soon as it\'s bought, if that storage already holds it; new kinds stay in your inventory.' : 'Each item goes into your Seed Silo / Tool Shack / Decor Shed (if you have them) as soon as it\'s bought.',
     'A refused item is skipped and left alone until that shop restocks. This window can stay open: after each restock, press Buy again.',
   ].filter(Boolean).join(' ');
@@ -3467,10 +3770,10 @@ function collectShopBuy() {
   const shops = game.readShops(settings.gardenOwner) ?? [];
   const inv0 = game.readStorage(settings.gardenOwner);
   const wanted = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && !isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key, left: Math.min(i.left, roomFor(i, inv0)) }))).filter((i) => i.left > 0);
-  const { items, short } = preflight(wanted, inv0); // checked against your coins, dust and free slots first
+  const { items, short, pins } = preflight(wanted, inv0); // checked against your coins, dust and free slots first
   const next = Math.min(...shops.map((sh) => sh.restockIn || Infinity));
   const off = shops.flatMap((sh) => sh.items.filter((i) => i.left > 0 && !shopSkip(i) && isBuyOff(sh.key, i.id)).map((i) => ({ ...i, shop: sh.key })));
-  return { shops, items, off, short, units: items.reduce((t, i) => t + i.left, 0), next, restocks: shops.map((sh) => sh.key + ':' + sh.restockId).join('|') };
+  return { shops, items, off, short, pins, units: items.reduce((t, i) => t + i.left, 0), next, restocks: shops.map((sh) => sh.key + ':' + sh.restockId).join('|') };
 }
 async function startShopBuy() {
   if (settings.featBuyAll === false) return;
@@ -3480,11 +3783,12 @@ async function startShopBuy() {
   const shortHtml = (short) => {
     if (!short?.length) return '';
     const noSlot = short.some((x) => x.why === 'no free inventory slot'), left = noSlot ? leftoverStacks().length : 0;
-    const used = noSlot ? game.readStorage(settings.gardenOwner).items.length : 0;
+    const used = noSlot ? game.readStorage(settings.gardenOwner).used : 0;
     return `<div class="refused"><b>Left out before buying:</b><ul>${short.map((s) => `<li>${esc(pretty(s.i.name))} ×${s.n}: ${esc(s.why)}</li>`).join('')}</ul>${noSlot ? `<div class="muted">Inventory: ${used}/${INVENTORY_SLOTS} slots in use.</div>` : ''}${left ? `<button data-m="putaway" style="margin-top:6px">📦 Put away ${left} stack${left === 1 ? '' : 's'} already kept in your Seed Silo / Tool Shack / Decor Shed</button>` : ''}</div>`;
   };
   const tileHtml = (i, off) => `<div class="buytile${off ? ' off' : ''}" data-buyoff="${esc(buyOffKey(i.shop, i.id))}" title="${esc(pretty(i.name))}: ${off ? 'switched off, click to buy it again' : 'click to switch it off (not bought)'}">${shopImg(i, 40)}<div class="bq">${off ? '⏸' : `×${i.left}`}</div><div class="bn">${esc(pretty(i.name))}</div>${dustCost(i) && !off ? `<div class="bd">✨ ${dustCost(i).toLocaleString()} dust each</div>` : ''}</div>`;
-  const listHtml = ({ shops, items, off = [], units, short }) => `${items.length ? `<div>All of the stock you can take: <b>${units} purchases</b>. <span class="muted">Click an item to switch it on or off.</span></div>` : `<div class="muted">Nothing to buy right now.</div>`}${shortHtml(short)}
+  const pinsHtml = (pins) => (pins?.length ? `<div class="muted pinnote">🧰 Your bag is full: to make room, ${pins.length === 1 ? 'this stack goes' : 'these stacks go'} into ${pins.length === 1 ? 'an empty Tool Pouch slot' : 'empty Tool Pouch slots'} first (they stay with you): ${esc(pins.map(stackName).join(', '))}.</div>` : '');
+  const listHtml = ({ shops, items, off = [], units, short, pins }) => `${items.length ? `<div>All of the stock you can take: <b>${units} purchases</b>. <span class="muted">Click an item to switch it on or off.</span></div>` : `<div class="muted">Nothing to buy right now.</div>`}${items.length ? pinsHtml(pins) : ''}${shortHtml(short)}
     ${items.length || off.length ? `<div class="buylist">${shops.map((sh) => [sh, items.filter((i) => i.shop === sh.key), off.filter((i) => i.shop === sh.key)]).filter(([, its, offs]) => its.length || offs.length).map(([sh, its, offs]) => `<div class="buyshop"><b>${esc(shopLabel(sh.key))}</b><div class="buytiles">${its.map((i) => tileHtml(i, false)).join('')}${offs.map((i) => tileHtml(i, true)).join('')}</div></div>`).join('')}</div>` : ''}`;
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
   let now = collect();
@@ -3501,6 +3805,7 @@ async function startShopBuy() {
   let buying = false, armedAt = Date.now() + 300; // a double-click can't go straight through
   // The window's colour says what to do, for a glance from a split screen: grey = wait, red = press Buy, blue = buying.
   const paint = () => {
+    if (!buying) net.verify();
     const ready = !buying && !!now.items.length && net.readiness().ok;
     m.classList.toggle('ready', ready);
     m.classList.toggle('buying', buying);
@@ -3581,7 +3886,8 @@ async function startShopBuy() {
 async function runShopBuy(items, st) {
   const plan = items.flatMap((i) => Array(i.left).fill(i));
   shopBusy = true; updateShopFab();
-  let done = 0, stopped = null, stored = null, skippedText = '';
+  let done = 0, stopped = null, stored = null, skippedText = '', pinFailed = null;
+  const pinned = [];
   try {
     // Fast but polite: up to 16 commands in flight, at most ~40 a second (~100 purchases in about 2.5 s), well under
     // the ~300 per 10 s the server is understood to allow. Coins, dust and inventory space were already checked
@@ -3600,7 +3906,17 @@ async function runShopBuy(items, st) {
     // before the next, so a new item's stack never needs more than that worker's slot. A worker whose stack can't be put
     // away (eggs, or no storage for it) has used its slot up and stops. Units of one item go out in parallel.
     const holds = (i) => game.readStorage(settings.gardenOwner).items.some((x) => x[i.idField] === i.id && (!x.itemType || x.itemType === i.itemType));
-    const freeAtStart = Math.max(0, INVENTORY_SLOTS - game.readStorage(settings.gardenOwner).items.length);
+    // 🧰 bag full: first pin stacks that stay in the bag anyway to empty Tool Pouch slots (as planned before buying),
+    // one at a time, each checked in the game's state before the next. Never a slot that's in use.
+    for (const x of preflight(items).pins ?? []) {
+      const inv = game.readStorage(settings.gardenOwner);
+      const pin = { itemType: x.itemType, id: stackKind(x) }, pk = pin.itemType + ':' + pin.id;
+      if (inv.pouchFree <= 0 || inv.pins.has(pk) || !inv.items.some((y) => !('id' in y) && y.itemType === pin.itemType && stackKind(y) === pin.id)) continue;
+      const r = await net.send({ type: 'MoveToolRingItem', pin, from: 'inventory', to: 'toolRing', toSlot: inv.pinList.length });
+      if (r.ok && await game.waitFor(() => game.readStorage(settings.gardenOwner).pins.has(pk), 2000)) pinned.push(stackName(x));
+      else { pinFailed = `${stackName(x)}: ${r.ok ? 'the game didn\'t show it in the pouch' : `the game said "${r.reason || r.code}"`}`; break; }
+    }
+    const freeAtStart = Math.max(0, INVENTORY_SLOTS - game.readStorage(settings.gardenOwner).used);
     const buyOne = async (i, key) => {
       st.textContent = `Buying… ${done} of ${plan.length} done`;
       // viewMode is required since game bundle 1292 (same fix as Arie's Mod); 'list' is what the shop's list view sends
@@ -3621,15 +3937,20 @@ async function runShopBuy(items, st) {
     };
     const halted = () => !!stopped;
     const worker = async (queue) => {
+      // A worker with a slot takes the next item; once its slot is taken by a stack that stays (or with no free slot at
+      // all) it still buys the items you already hold, which need no slot. Items needing a slot that no worker can take
+      // are left in the queue and reported below.
+      let hasSlot = freeAtStart > 0;
       while (queue.length && !halted()) {
-        const i = queue.shift();
+        const at = hasSlot ? 0 : queue.findIndex((x) => holds(x));
+        if (at < 0) return;
+        const [i] = queue.splice(at, 1);
         const key = i.shop + ':' + i.id;
         const isNew = !holds(i);
-        if (isNew && freeAtStart === 0) { failedItems.set(key, `${pretty(i.name)}: no free inventory slot (left for the next press)`); continue; }
         // first unit alone (it makes the stack), then the rest together
         if (await buyOne(i, key) && i.left > 1) await Promise.all(Array.from({ length: i.left - 1 }, () => (halted() || failedItems.has(key) ? false : buyOne(i, key))));
         if (unitsLeft.get(key) < i.left) await storeItem(i, tally); // put the stack away now
-        if (isNew && holds(i)) return; // this worker's slot is taken by a stack that stays
+        if (isNew && holds(i)) hasSlot = false; // this worker's slot is taken by a stack that stays
       }
     };
     const queue = items.slice();
@@ -3650,6 +3971,8 @@ async function runShopBuy(items, st) {
     render();
   }
   const html = esc(stopped ? `Stopped: ${stopped}. Bought ${done} of ${plan.length}.` : `Bought ${done} of ${plan.length}.`)
+    + (pinned.length ? `<div class="muted">🧰 Pinned to your Tool Pouch to make room: ${esc(pinned.join(', '))}.</div>` : '')
+    + (pinFailed ? `<div class="refused">🧰 Couldn't pin to the Tool Pouch (${esc(pinFailed)}); what needed that room was left for the next press.</div>` : '')
     + esc(stored && (stored.moved || stored.kept) ? ` Put away: ${stored.moved} stack${stored.moved === 1 ? '' : 's'}${stored.kept ? `, ${stored.kept} left in your inventory (no room or no storage for them)` : ''}.` : '')
     + (stored?.full?.size ? `<div class="muted">${[...stored.full].map(([n, w]) => `${esc(n)}: ${esc(w)}.`).join(' ')}</div>` : '')
     + (stored?.why?.size ? `<div class="refused"><b>Not put away:</b><ul>${[...stored.why].map(([n, w]) => `<li>${esc(n)}: ${esc(w)}</li>`).join('')}</ul></div>` : '') + skippedText;
@@ -3800,40 +4123,168 @@ function alertSummary() {
 const alertBell = (i) => { const m = alertMode(i), set = (settings.rareAlertModes ?? {})[i.id] != null;
   return `<span class="bell${m !== 'off' ? ' on' : ''}" data-bell="${esc(i.id)}" data-mode="${m}" title="${esc(ALERT_WORD[m])}${set ? '' : ` (default${itemRarity(i) ? ', ' + esc(itemRarity(i)) : ''})`} · click to change">${ALERT_ICON[m]}</span>`; };
 // 🔔 Alerts menu: every item of every shop, each with a three-way switch (off / once / repeat)
+// ---------- Items that are always in stock ----------
+// Neither the game data nor the wiki says how often an item appears, so the mod counts it: for each shop, how many
+// restocks it has seen and in how many of them each item was for sale. An item in every one of at least 8 restocks
+// (97% once there are 20 or more) counts as always available; the alerts and game notifications menus hide those
+// (a switch shows them).
+const ALWAYS_MIN = 8;
+let shopStats = store.get('shopStats', {}); // { shopKey: { n, last, items: { id: count } } }
+function countRestocks() {
+  const shops = game.readShops(settings.gardenOwner); if (!shops) return;
+  let changed = false;
+  for (const sh of shops) {
+    const id = sh.items.find((i) => i.restockId != null)?.restockId;
+    if (id == null || !sh.items.length) continue;
+    const st = (shopStats[sh.key] ??= { n: 0, last: null, items: {} });
+    if (st.last === String(id)) continue;
+    st.last = String(id); st.n++;
+    for (const i of sh.items) if (i.stock > 0) st.items[i.id] = (st.items[i.id] || 0) + 1;
+    changed = true;
+  }
+  if (changed) store.set('shopStats', shopStats);
+}
+setInterval(() => { try { countRestocks(); } catch {} }, 5000);
+if (TEST_BUILD) W.__mglhCountRestocks = countRestocks;
+// Stock rates from Arie's shop history (mg-api …/stats/items?shop=…: per item, the share of the last 30 days' restocks
+// it was in; the explorer's "shop history" uses the same). Kept for 12 hours. When they can't be had, the mod's own
+// count above is used instead.
+const STATS_URL = 'https://mg-api.ariedam.fr/stats/items?shop=';
+const RATE_SHOPS = ['seed', 'egg', 'tool', 'decor', 'dawn', 'amber', 'snow', 'thunder', 'rain', 'spooky'];
+let shopRates = store.get('shopRates', null); // { at, shops: { key: { total, items: { id: [rate, appearances] } } } }
+let shopRatesLoading = null;
+function loadShopRates() {
+  if (shopRates?.at && Date.now() - shopRates.at < 12 * 3600000) return Promise.resolve(false);
+  if (shopRatesLoading) return shopRatesLoading;
+  const doFetch = typeof W.fetch === 'function' ? W.fetch.bind(W) : fetch;
+  shopRatesLoading = Promise.all(RATE_SHOPS.map(async (key) => {
+    try {
+      const r = await doFetch(STATS_URL + key, { credentials: 'omit' });
+      if (!r.ok) return null;
+      const d = await r.json();
+      const total = Number(d?.total_restocks) || 0;
+      if (!total || !Array.isArray(d.items)) return null;
+      return [key, { total, items: Object.fromEntries(d.items.filter((x) => x?.item_id).map((x) => [x.item_id, [Number(x.drop_rate) || 0, Number(x.appearances) || 0]])) }];
+    } catch { return null; }
+  })).then((res) => {
+    const shops = Object.fromEntries(res.filter(Boolean));
+    if (Object.keys(shops).length) { shopRates = { at: Date.now(), shops }; store.set('shopRates', shopRates); }
+    shopRatesLoading = null;
+    return true;
+  });
+  return shopRatesLoading;
+}
+setTimeout(() => { loadShopRates().catch(() => {}); }, 8000);
+const rateOf = (shop, id) => { const st = shopRates?.shops?.[shop]; const x = st?.items?.[id]; return st ? { rate: x ? x[0] : 0, seen: x ? x[1] : 0, total: st.total } : null; };
+const ratePct = (r) => (r >= 0.1 ? `${Math.round(r * 100)}%` : r >= 0.01 ? `${(r * 100).toFixed(1)}%` : r > 0 ? `${(r * 100).toFixed(2)}%` : '0%');
+const alwaysIn = (shop, id) => {
+  const r = rateOf(shop, id);
+  if (r && r.total >= 20) return r.rate >= 0.999;
+  const st = shopStats[shop]; if (!st || st.n < ALWAYS_MIN) return false; const c = st.items[id] || 0; return st.n < 20 ? c >= st.n : c >= Math.ceil(st.n * 0.97);
+};
+// Every item any shop sells (the game data's eligibleShops, plus what the mod has seen in shops), whether the shop is
+// open or not, with its home shop (a weather or event shop when it has one), rarity, and how many are in stock now.
+const BASE_SHOPS = ['seed', 'egg', 'tool', 'decor'];
+const SHOP_ORDER = ['seed', 'egg', 'tool', 'decor', 'dawn', 'amber', 'snow', 'thunder'];
+function allShopItems() {
+  const map = new Map();
+  const add = (itemType, idField, id, name, shops) => {
+    const k = itemType + ':' + id;
+    const it = map.get(k) ?? { itemType, idField, id, name, shops: [] };
+    if (!it.name || it.name === id) it.name = name || id;
+    for (const sh of shops) if (!it.shops.includes(sh)) it.shops.push(sh);
+    map.set(k, it);
+  };
+  const sources = [['plants', 'Seed', 'species'], ['eggs', 'Egg', 'eggId'], ['items', 'Tool', 'toolId'], ['decors', 'Decor', 'decorId']];
+  for (const [kind, itemType, idField] of sources) {
+    for (const [id, d] of Object.entries(unwrapLive(liveData?.[kind]) ?? {})) {
+      const shops = (d?.seed?.eligibleShops ?? d?.eligibleShops ?? []).map((x) => String(x).toLowerCase());
+      if (shops.length) add(itemType, idField, id, d?.seed?.name ?? d?.name ?? id, shops);
+    }
+  }
+  for (const [shop, items] of Object.entries(shopSeen)) for (const x of Object.values(items)) add(x.itemType, x.idField, x.id, x.name, [shop]);
+  const live = game.readShops(settings.gardenOwner) ?? [];
+  for (const sh of live) for (const i of sh.items) add(i.itemType, i.idField, i.id, i.name, [sh.key]);
+  // After the Haunt Event the Spooky shop sells nothing (unless the game opens it again): items only sold there drop out
+  // of the alert and notification lists
+  const spookyGone = spookyOver() && !live.some((sh) => sh.key === 'spooky' && !sh.closed);
+  const out = [...map.values()].map((it) => (spookyGone ? { ...it, shops: it.shops.filter((x) => x !== 'spooky') } : it)).filter((it) => it.shops.length);
+  for (const it of out) {
+    // home shop: a weather or event shop when it has one (like with like), else its base shop
+    it.home = it.shops.find((x) => !BASE_SHOPS.includes(x) && x !== 'spooky') ?? (it.shops.includes('spooky') ? 'spooky' : it.shops[0]);
+    it.rarity = itemRarity(it);
+    it.left = live.reduce((a, sh) => a + sh.items.filter((i) => i.id === it.id && i.itemType === it.itemType).reduce((b, i) => b + (i.left || 0), 0), 0);
+    it.always = alwaysIn(it.home, it.id);
+    it.stock = rateOf(it.home, it.id); // { rate, seen, total } or null
+  }
+  return out;
+}
+// Items grouped by home shop (in shop order), each group sorted rarest first
+function shopSections(items) {
+  const keys = [...new Set(items.map((i) => i.home))].sort((a, b) => {
+    const ia = a === 'spooky' ? 99 : SHOP_ORDER.indexOf(a), ib = b === 'spooky' ? 99 : SHOP_ORDER.indexOf(b);
+    return (ia < 0 ? 50 : ia) - (ib < 0 ? 50 : ib) || a.localeCompare(b);
+  });
+  return keys.map((key) => ({ key, title: shopLabel(key), items: items.filter((i) => i.home === key)
+    .sort((x, y) => rarityRank(y.rarity) - rarityRank(x.rarity) || (x.stock?.rate ?? 2) - (y.stock?.rate ?? 2) || String(pretty(x.name)).localeCompare(String(pretty(y.name)))) }));
+}
+const RARITY_EDGE = (r) => (r === 'Celestial' ? 'linear-gradient(#ff5a5a,#ffb84d,#f5e05a,#6ad97a,#5ab8ff,#b07aff)' : RARITY_COLOR[r] ?? '#3a3d45');
+// One item cell: picture, name (coloured edge = rarity), extra text, and the switch
+const gnCell = (i, ctrl, extra = '') => `<div class="gn-cell" title="${esc(pretty(i.name))}${i.rarity ? ' · ' + esc(i.rarity) : ''}${i.stock ? ` · in stock in ${i.stock.seen} of the last ${i.stock.total} ${shopLabel(i.home).replace(/^\S+\s/, '')} restocks (30 days, Arie's shop history)` : ''}${i.shops.length > 1 ? ' · sold in: ' + esc(i.shops.map(shopLabel).join(', ')) : ''}" style="--edge:${RARITY_EDGE(i.rarity)}">${shopImg(i, 24)}<span class="gn-name">${esc(pretty(i.name))}${i.left > 0 ? ` <b class="alrt-in">×${i.left}</b>` : ''}${i.stock ? ` <span class="gn-rate">${ratePct(i.stock.rate)}</span>` : ''}${i.always && !i.stock ? ' <span class="muted">· always</span>' : ''}${extra}</span>${ctrl}</div>`;
+// The section frame: collapsible, sticky header with a count and bulk buttons
+const gnSection = (key, title, count, bulk, body, closed) => `<details class="gn-sec" data-sec="${esc(key)}"${closed ? '' : ' open'}><summary><span class="gn-caret">▸</span><b>${title}</b>${count ? ` <span class="muted">${count}</span>` : ''}<span class="alrt-bulk">${bulk}</span></summary>${body}</details>`;
+// what the "always available" counting has seen so far, for shops still under the threshold
+function alwaysNote(hidden) {
+  if (shopRates?.shops && Object.keys(shopRates.shops).length) return `${hidden ? `${hidden} item${hidden === 1 ? '' : 's'} in every restock hidden. ` : ''}% = how often an item was in stock (last 30 days, Arie's shop history).`;
+  const short = SHOP_ORDER.slice(0, 4).filter((k) => (shopStats[k]?.n ?? 0) < ALWAYS_MIN).map((k) => `${shopLabel(k)} ${shopStats[k]?.n ?? 0}/${ALWAYS_MIN}`);
+  return `${hidden ? `${hidden} always-available item${hidden === 1 ? '' : 's'} hidden. ` : ''}${short.length ? `Restocks counted so far (items in every restock get hidden after ${ALWAYS_MIN}): ${short.join(', ')}.` : ''}`;
+}
 function openAlertMenu() {
-  const shops = game.readShops(settings.gardenOwner);
-  const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">🔔 Alerts</b><span class="muted">${esc(alertSummary())}</span></div>
-    <div class="muted">🔕 no alert · 🔔 once per restock · 🔁 again every ${esc(settings.rareAlertEvery || 15)} s until bought, and on your phone. Items you haven't set (shown faded) follow the rarity default in Settings.</div>
+  const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">🔔 Alerts</b><span class="muted al-sum">${esc(alertSummary())}</span></div>
+    <div class="muted">🔕 no alert · 🔔 once per restock · 🔁 again every ${esc(settings.rareAlertEvery || 15)} s until bought, and on your phone. Faded switches follow the rarity default in Settings. Every shop is listed, open now or not; rarest first.</div>
     <div class="alrt-tools"><input type="search" class="alrt-q" placeholder="Search items…"><select class="alrt-f"><option value="all">All items</option><option value="on">Alerting</option><option value="repeat">Repeating</option><option value="set">Set by you</option></select></div>
     <div class="alrt-list"></div>
+    <div class="gn-foot"><label><input type="checkbox" class="gn-always"${settings.showAlwaysItems ? ' checked' : ''}> Show always-available items</label><span class="gn-alwaysnote"></span></div>
     <div class="acts"><button data-m="aries" title="Copy the shop alerts you follow in Arie's Mod (in this browser)">Import from Arie's Mod…</button><button data-m="reset" title="Forget every choice: all items follow the rarity default">Reset all</button><button data-m="close">Close</button></div>`);
-  m.classList.add('alertdlg');
+  m.classList.add('alertdlg', 'griddlg');
   const list = m.querySelector('.alrt-list'), q = m.querySelector('.alrt-q'), f = m.querySelector('.alrt-f');
+  const closedSecs = new Set();
+  loadShopRates().then((fresh) => { if (fresh && document.body.contains(m)) draw(); }).catch(() => {});
   const seg = (i) => { const cur = alertMode(i), set = (settings.rareAlertModes ?? {})[i.id] != null;
     return `<span class="alrt-seg${set ? '' : ' dflt'}">${ALERT_MODES.map((md) => `<button data-am="${md}" data-id="${esc(i.id)}" class="${cur === md ? 'on' : ''}" title="${esc(ALERT_WORD[md])}">${ALERT_ICON[md]}</button>`).join('')}</span>`; };
+  let shown = [];
   const draw = () => {
+    m.querySelector('.al-sum').textContent = alertSummary();
     const needle = q.value.trim().toLowerCase(), want = f.value;
-    if (!shops) { list.innerHTML = '<div class="muted">Couldn\'t read the shops yet: join your garden first.</div>'; return; }
-    list.innerHTML = shops.map((sh) => {
-      const items = shopCatalog(sh).filter((i) => (!needle || String(pretty(i.name)).toLowerCase().includes(needle) || String(i.id).toLowerCase().includes(needle))
-        && (want === 'all' || (want === 'on' && alertMode(i) !== 'off') || (want === 'repeat' && alertMode(i) === 'repeat') || (want === 'set' && (settings.rareAlertModes ?? {})[i.id] != null)));
-      if (!items.length) return '';
-      items.sort((x, y) => rarityRank(itemRarity(y)) - rarityRank(itemRarity(x)) || String(pretty(x.name)).localeCompare(String(pretty(y.name))));
-      return `<div class="alrt-shop"><div class="alrt-sh"><b>${esc(shopLabel(sh.key))}</b>${sh.closed ? ' <span class="muted">closed now</span>' : ''}<span class="alrt-bulk muted">all: ${ALERT_MODES.map((md) => `<button class="mini" data-bulk="${md}" data-shop="${esc(sh.key)}" title="${esc(ALERT_WORD[md])} for every item listed here">${ALERT_ICON[md]}</button>`).join('')}</span></div>
-        ${items.map((i) => `<div class="alrt-row">${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${rarityTag(itemRarity(i))}${shopSkip(i) ? ` <span class="muted">· ${esc(SKIP_LABEL[shopSkip(i)] || 'never bought')}</span>` : ''}${i.left > 0 ? ` <b class="alrt-in">in stock ×${i.left}</b>` : ''}</span>${seg(i)}</div>`).join('')}</div>`;
+    const all = allShopItems();
+    if (!all.length) { list.innerHTML = '<div class="muted">The game\'s item list hasn\'t loaded yet: join your garden, then open this again.</div>'; return; }
+    // items in every restock are hidden, unless they're set to alert (so that can be switched off)
+    const hidden = settings.showAlwaysItems ? 0 : all.filter((i) => i.always && alertMode(i) === 'off').length;
+    const items = all.filter((i) => (settings.showAlwaysItems || !i.always || alertMode(i) !== 'off')
+      && (!needle || String(pretty(i.name)).toLowerCase().includes(needle) || String(i.id).toLowerCase().includes(needle))
+      && (want === 'all' || (want === 'on' && alertMode(i) !== 'off') || (want === 'repeat' && alertMode(i) === 'repeat') || (want === 'set' && (settings.rareAlertModes ?? {})[i.id] != null)));
+    shown = items;
+    m.querySelector('.gn-alwaysnote').textContent = alwaysNote(hidden);
+    list.innerHTML = shopSections(items).map((sec) => {
+      const on = sec.items.filter((i) => alertMode(i) !== 'off').length;
+      const bulk = `all: ${ALERT_MODES.map((md) => `<button class="mini" data-bulk="${md}" data-shop="${esc(sec.key)}" title="${esc(ALERT_WORD[md])} for every item listed here">${ALERT_ICON[md]}</button>`).join('')}`;
+      return gnSection(sec.key, sec.title, `${on} of ${sec.items.length} alerting`, bulk, `<div class="gn-grid">${sec.items.map((i) => gnCell(i, seg(i))).join('')}</div>`, closedSecs.has(sec.key) && !needle);
     }).join('') || '<div class="muted">No items match.</div>';
   };
   m.addEventListener('input', (e) => { if (e.target === q) draw(); });
-  m.addEventListener('change', (e) => { if (e.target === f) draw(); });
+  m.addEventListener('change', (e) => {
+    if (e.target === f) draw();
+    if (e.target.classList?.contains('gn-always')) { settings.showAlwaysItems = e.target.checked; saveSettings(); draw(); }
+  });
+  m.addEventListener('toggle', (e) => { const d = e.target; if (d.classList?.contains('gn-sec')) { if (d.open) closedSecs.delete(d.dataset.sec); else closedSecs.add(d.dataset.sec); } }, true);
   m.addEventListener('click', (e) => {
     if (e.target === m) { m.remove(); render(); return; }
     const b = e.target.closest('button'); if (!b) return;
+    if (b.closest('summary')) e.preventDefault(); // a button in a section header doesn't fold the section
     if (b.dataset.am) { setAlertMode(b.dataset.id, b.dataset.am); draw(); return; }
     if (b.dataset.bulk) {
-      const sh = shops?.find((x) => x.key === b.dataset.shop); if (!sh) return;
-      const needle = q.value.trim().toLowerCase();
       const modes = { ...(settings.rareAlertModes ?? {}) };
-      for (const i of shopCatalog(sh)) if (!needle || String(pretty(i.name)).toLowerCase().includes(needle)) modes[i.id] = b.dataset.bulk;
+      for (const i of shown) if (i.home === b.dataset.shop) modes[i.id] = b.dataset.bulk;
       settings.rareAlertModes = modes; saveSettings(); draw(); return;
     }
     if (b.dataset.m === 'reset') { if (confirm('Forget all your alert choices? Every item goes back to the rarity default.')) { settings.rareAlertModes = {}; saveSettings(); draw(); } return; }
@@ -3871,7 +4322,7 @@ function openBuyMenu() {
     m.querySelector('.buysum').textContent = buySummary();
     const needle = q.value.trim().toLowerCase(), want = f.value;
     if (!shops) { list.innerHTML = '<div class="muted">Couldn\'t read the shops yet: join your garden first.</div>'; return; }
-    list.innerHTML = shops.map((sh) => {
+    list.innerHTML = shops.filter((sh) => !(sh.key === 'spooky' && sh.closed && spookyOver())).map((sh) => {
       const items = shopCatalog(sh).filter((i) => match(i, needle) && (want === 'all' || (want === 'stock' && i.left > 0)
         || (want === 'never' && locked(i)) || (want === 'off' && !locked(i) && isBuyOff(sh.key, i.id)) || (want === 'on' && !locked(i) && !isBuyOff(sh.key, i.id))));
       if (!items.length) return '';
@@ -3905,7 +4356,6 @@ function openBuyMenu() {
 // …/unsubscribe and a body like { subject: 'QuinoaSeedInStock', itemId: 'Carrot' } (your browser's login is what says
 // it's you). This screen does the same, one change at a time, only when you press a switch. Nothing else is sent.
 const NOTIF_SUBJECT = { Seed: 'QuinoaSeedInStock', Egg: 'QuinoaEggInStock', Tool: 'QuinoaToolInStock', Decor: 'QuinoaDecorInStock' };
-const NOTIF_GROUP = { QuinoaSeedInStock: '🌱 Seeds', QuinoaEggInStock: '🥚 Eggs', QuinoaToolInStock: '🔧 Tools', QuinoaDecorInStock: '🪑 Decor' };
 const notifKey = (s) => `${s.subject}:${s.itemId}`;
 function notifBase() {
   // the game connection's own address: wss://magicgarden.gg/version/1714/api/rooms/ROOM/connect?…
@@ -3947,58 +4397,75 @@ function notifCatalog() {
 // Weather and day & night notifications (the game's "weather" and "nighttime" categories). Weather ids from the game data
 // (mg-api …/data/weathers), else the ones known in 2026-10; day & night: the game's three phases.
 const NOTIF_WEATHER_FALLBACK = { Rain: 'Rain', Frost: 'Snow', Thunderstorm: 'Thunderstorm', Dawn: 'Dawn', AmberMoon: 'Amber Moon', Sunny: 'Sunny' };
-const NOTIF_DAYNIGHT = [['sunset', '🌇 Night falls (sunset; the Spooky shop opens at night)'], ['midnight', '🌙 Midnight'], ['sunrise', '🌅 The sun rises']];
+// The Haunt Event and its Spooky shop end on 2026-11-10 00:00 UTC (the game's announcement of 2026-10-30). Night goes
+// on after that, every 4 hours with the lunar cycle (each midnight brings the Dawn or Amber Moon).
+const SPOOKY_ENDS = Date.UTC(2026, 10, 10);
+const spookyOver = () => Date.now() >= SPOOKY_ENDS;
+const NOTIF_DAYNIGHT_BASE = [['sunset', '🌇 Night falls', 'Sunset: night falls (every 4 hours)'], ['midnight', '🌙 Midnight', 'Midnight: the Dawn or Amber Moon starts'], ['sunrise', '🌅 Sun rises', 'Sunrise: the last part of the night']];
+const nightDaynight = () => NOTIF_DAYNIGHT_BASE.map(([id, label, tip]) => [id, label, spookyOver() ? tip : id === 'sunset' ? 'Sunset: night falls and the Spooky shop opens (every 4 hours)' : id === 'midnight' ? `${tip} (the Spooky shop is open)` : tip]);
 function notifExtras() {
   const live = unwrapLive(liveData?.weathers);
   const weathers = live && typeof live === 'object' && Object.keys(live).length ? Object.fromEntries(Object.entries(live).map(([id, w]) => [id, w?.name || id])) : NOTIF_WEATHER_FALLBACK;
   return [
     ...Object.entries(weathers).map(([id, name]) => ({ key: notifKey({ subject: 'QuinoaWeatherActive', itemId: id }), label: `🌦️ ${name}`, group: 'weather' })),
-    ...NOTIF_DAYNIGHT.map(([id, label]) => ({ key: notifKey({ subject: 'QuinoaDayNightPhase', itemId: id }), label, group: 'daynight' })),
+    ...nightDaynight().map(([id, label, tip]) => ({ key: notifKey({ subject: 'QuinoaDayNightPhase', itemId: id }), label, tip, group: 'daynight' })),
   ];
 }
+// weather → the shop it brings (its notification sits with that shop's items)
+const WEATHER_SHOP = { Dawn: 'dawn', AmberMoon: 'amber', Frost: 'snow', Thunderstorm: 'thunder' };
 async function openGameNotifs() {
   const m = modal(`<div class="shopdlg-hd"><b style="font-size:16px">📱 Game notifications</b><span class="muted gn-sum">loading…</span></div>
-    <div class="muted">The game's own restock notifications, the ones the Magic Garden phone app sends. They're saved on your account, so the app follows what you set here (it may show it after reopening). Every item of every shop is listed, open now or not.</div>
-    <div class="alrt-tools"><input type="search" class="alrt-q" placeholder="Search items…"><select class="alrt-f"><option value="all">All items</option><option value="on">Notifying</option><option value="off">Not notifying</option></select><select class="gn-shop"></select></div>
+    <div class="muted">The game's own notifications, the ones the Magic Garden phone app sends. They're saved on your account, so the app follows what you set here (it may show it after reopening). Every shop is listed, open now or not, with its weather; rarest first.</div>
+    <div class="alrt-tools"><input type="search" class="alrt-q" placeholder="Search…"><select class="alrt-f"><option value="all">All</option><option value="on">Notifying</option><option value="off">Not notifying</option></select></div>
     <div class="alrt-list"></div>
+    <div class="gn-foot"><label><input type="checkbox" class="gn-always"${settings.showAlwaysItems ? ' checked' : ''}> Show always-available items</label><span class="gn-alwaysnote"></span></div>
     <div class="muted gn-st" style="min-height:18px"></div>
     <div class="acts"><button data-m="alloff" title="Switch off every notification on your account (the game's own 'delete all')">Turn all off…</button><button data-m="close">Close</button></div>`);
-  m.classList.add('alertdlg');
-  const list = m.querySelector('.alrt-list'), q = m.querySelector('.alrt-q'), f = m.querySelector('.alrt-f'), shopSel = m.querySelector('.gn-shop'), st = m.querySelector('.gn-st');
-  const cat = notifCatalog();
-  let subs = null, busyN = 0, err = '';
-  const on = new Set();
-  const shopsAll = [...new Set(cat.flatMap((i) => i.shops))].sort((a, b) => (SHOP_NAMES[a] ? 0 : 1) - (SHOP_NAMES[b] ? 0 : 1) || a.localeCompare(b));
-  shopSel.innerHTML = `<option value="">All shops</option>${shopsAll.map((k) => `<option value="${esc(k)}">${esc(shopLabel(k))}</option>`).join('')}`;
+  m.classList.add('alertdlg', 'griddlg');
+  const list = m.querySelector('.alrt-list'), q = m.querySelector('.alrt-q'), f = m.querySelector('.alrt-f'), st = m.querySelector('.gn-st');
+  let subs = null, busyN = 0, err = '', shownKeys = new Map();
+  const on = new Set(), closedSecs = new Set();
+  loadShopRates().then((fresh) => { if (fresh && document.body.contains(m) && subs) draw(); }).catch(() => {});
   const status = () => { m.querySelector('.gn-sum').textContent = subs ? `${on.size} notifying` : 'loading…'; st.textContent = busyN ? `Saving… ${busyN} left` : err; };
-  const match = (i) => { const needle = q.value.trim().toLowerCase(); return (!needle || String(pretty(i.name)).toLowerCase().includes(needle) || String(i.id).toLowerCase().includes(needle)) && (!shopSel.value || i.shops.includes(shopSel.value))
-    && (f.value === 'all' || (f.value === 'on') === on.has(notifKey({ subject: i.subject, itemId: i.id }))); };
-  const shopTags = (i) => i.shops.filter((x) => !['seed', 'egg', 'tool', 'decor'].includes(x)).map((x) => `<span class="muted">· ${esc(shopLabel(x))}</span>`).join(' ');
-  const sw = (key, isOn, offered = true) => (offered ? `<span class="alrt-seg"><button data-gk="${esc(key)}" data-on="1" class="${isOn ? 'on' : ''}" title="Notify me when it's in stock">🔔</button><button data-gk="${esc(key)}" data-on="0" class="${isOn ? '' : 'on'}" title="No notification">🔕</button></span>` : '<span class="muted" style="flex:0 0 auto" title="The game doesn\'t offer notifications for items only sold in the Spooky shop">not offered</span>');
+  const tog = (key) => `<button class="gn-tog${on.has(key) ? ' on' : ''}" data-gk="${esc(key)}" title="${on.has(key) ? 'Notifying: click to stop' : 'Click to get a notification'}">${on.has(key) ? '🔔' : '🔕'}</button>`;
+  const evCell = (x) => `<div class="gn-cell" style="--edge:#5b7fbf" title="${esc(x.tip || x.label)}"><span class="gn-ev">${x.icon}</span><span class="gn-name">${esc(x.label)}</span>${tog(x.key)}</div>`;
   const draw = () => {
     status();
     if (!subs) { list.innerHTML = `<div class="muted">${esc(err || 'Loading your notifications…')}</div>`; return; }
-    const groups = Object.entries(NOTIF_GROUP).map(([subject, title]) => {
-      const items = cat.filter((i) => i.subject === subject && match(i));
-      if (!items.length) return '';
-      items.sort((x, y) => (y.offered - x.offered) || rarityRank(itemRarity(y)) - rarityRank(itemRarity(x)) || String(pretty(x.name)).localeCompare(String(pretty(y.name))));
-      return `<div class="alrt-shop"><div class="alrt-sh"><b>${esc(title)}</b><span class="alrt-bulk muted">all listed: <button class="mini" data-gbulk="1" data-subject="${subject}" title="Notify for every item listed here">🔔</button><button class="mini" data-gbulk="0" data-subject="${subject}" title="No notification for every item listed here">🔕</button></span></div>
-        ${items.map((i) => { const key = notifKey({ subject: i.subject, itemId: i.id }); return `<div class="alrt-row"${i.offered ? '' : ' style="opacity:.55"'}>${shopImg(i, 26)}<span class="alrt-name">${esc(pretty(i.name))}${rarityTag(itemRarity(i))} ${shopTags(i)}</span>${sw(key, on.has(key), i.offered)}</div>`; }).join('')}</div>`;
+    const needle = q.value.trim().toLowerCase(), want = f.value;
+    const keep = (key, text) => (!needle || text.toLowerCase().includes(needle)) && (want === 'all' || (want === 'on') === on.has(key));
+    const all = allShopItems().filter((i) => NOTIF_SUBJECT[i.itemType]).map((i) => ({ ...i, key: notifKey({ subject: NOTIF_SUBJECT[i.itemType], itemId: i.id }), offered: i.shops.some((x) => x !== 'spooky') }));
+    // items in every restock are hidden, unless they're switched on (so they can be switched off)
+    const hidden = settings.showAlwaysItems ? 0 : all.filter((i) => i.always && i.offered && !on.has(i.key)).length;
+    const items = all.filter((i) => i.offered && (settings.showAlwaysItems || !i.always || on.has(i.key)) && keep(i.key, `${pretty(i.name)} ${i.id}`));
+    m.querySelector('.gn-alwaysnote').textContent = alwaysNote(hidden);
+    // weather and night notifications go with their shops; weathers without a shop get their own section
+    const ev = notifExtras().map((x) => {
+      const id = x.key.slice(x.key.indexOf(':') + 1);
+      const shop = x.group === 'daynight' ? 'spooky' : WEATHER_SHOP[id] ?? 'weather';
+      return { ...x, shop, icon: x.label.split(' ')[0], label: x.group === 'weather' ? `${x.label.replace(/^\S+\s/, '')} weather starts` : x.label.replace(/^\S+\s/, '') };
+    }).filter((x) => keep(x.key, x.label));
+    shownKeys = new Map();
+    const secs = shopSections(items);
+    for (const k of [...new Set(ev.map((x) => x.shop))]) if (!secs.some((sx) => sx.key === k)) secs.push({ key: k, title: k === 'weather' ? '🌦️ Other weather' : shopLabel(k), items: [] });
+    const order = (k) => (k === 'weather' ? 200 : k === 'spooky' ? 100 : SHOP_ORDER.includes(k) ? SHOP_ORDER.indexOf(k) : 50);
+    secs.sort((a, b) => order(a.key) - order(b.key));
+    const spookyOnly = all.filter((i) => !i.offered).length;
+    list.innerHTML = secs.map((sec) => {
+      const evs = ev.filter((x) => x.shop === sec.key);
+      const keys = [...evs.map((x) => x.key), ...sec.items.map((i) => i.key)];
+      shownKeys.set(sec.key, keys);
+      const n = keys.filter((k) => on.has(k)).length;
+      const bulk = keys.length ? `all: <button class="mini" data-gbulk="1" data-shop="${esc(sec.key)}" title="Notify for everything listed here">🔔</button><button class="mini" data-gbulk="0" data-shop="${esc(sec.key)}" title="No notification for anything listed here">🔕</button>` : '';
+      const title = sec.key === 'spooky' ? (spookyOver() ? '🌙 Night' : '🌙 Night · 🎃 Spooky shop') : sec.title;
+      const note = sec.key === 'spooky' && spookyOnly && !needle ? `<div class="gn-note">The game doesn't send notifications for items only sold in the Spooky shop (it refuses them); "Night falls" tells you when the shop opens.</div>` : '';
+      return gnSection(sec.key, title, keys.length ? `${n} of ${keys.length} on` : '', bulk, `<div class="gn-grid">${evs.map(evCell).join('')}${sec.items.map((i) => gnCell(i, tog(i.key))).join('')}</div>${note}`, closedSecs.has(sec.key) && !needle);
     }).join('');
-    // weather and day & night (not tied to a shop: hidden while a shop is picked)
-    const extras = notifExtras();
-    const needle = q.value.trim().toLowerCase();
-    const extraRows = (group, title) => {
-      if (shopSel.value) return '';
-      const rows = extras.filter((x) => x.group === group && (!needle || x.label.toLowerCase().includes(needle)) && (f.value === 'all' || (f.value === 'on') === on.has(x.key)));
-      return rows.length ? `<div class="alrt-shop"><div class="alrt-sh"><b>${title}</b></div>${rows.map((x) => `<div class="alrt-row"><span class="alrt-name">${esc(x.label)}</span>${sw(x.key, on.has(x.key))}</div>`).join('')}</div>` : '';
-    };
-    const extrasHtml = extraRows('daynight', '🌙 Day & Night') + extraRows('weather', '🌦️ Weather');
-    // anything else on your account: daily quests, items not in the game data
-    const known = new Set([...cat.map((i) => notifKey({ subject: i.subject, itemId: i.id })), ...extras.map((x) => x.key)]);
-    const other = subs.filter((s) => !known.has(notifKey(s)));
-    const otherHtml = other.length && !f.value.startsWith('off') ? `<div class="alrt-shop"><div class="alrt-sh"><b>Other notifications on your account</b></div>${other.map((s) => `<div class="alrt-row"><span class="alrt-name">${esc(String(s.subject).replace(/^Quinoa/, ''))}: ${esc(s.itemId ?? '')}</span>${sw(notifKey(s), on.has(notifKey(s)))}</div>`).join('')}</div>` : '';
-    list.innerHTML = extrasHtml + groups + otherHtml || '<div class="muted">No items match.</div>';
+    // anything else on your account (daily quests, items not in the game data)
+    const known = new Set([...all.map((i) => i.key), ...notifExtras().map((x) => x.key)]);
+    const other = subs.filter((sx) => !known.has(notifKey(sx)) && on.has(notifKey(sx)));
+    if (other.length && want !== 'off') list.innerHTML += gnSection('other', 'Other notifications on your account', '', '', `<div class="gn-grid">${other.map((sx) => `<div class="gn-cell" style="--edge:#5b7fbf"><span class="gn-name">${esc(String(sx.subject).replace(/^Quinoa/, ''))}: ${esc(sx.itemId ?? '')}</span>${tog(notifKey(sx))}</div>`).join('')}</div>`, false);
+    if (!list.innerHTML) list.innerHTML = '<div class="muted">Nothing matches.</div>';
   };
   const parseKey = (key) => { const i = key.indexOf(':'); return { subject: key.slice(0, i), itemId: key.slice(i + 1) }; };
   // one change at a time, in order
@@ -4017,16 +4484,21 @@ async function openGameNotifs() {
   };
   const close = () => { m.remove(); render(); };
   m.addEventListener('input', (e) => { if (e.target === q) draw(); });
-  m.addEventListener('change', (e) => { if (e.target === f || e.target === shopSel) draw(); });
+  m.addEventListener('change', (e) => {
+    if (e.target === f) draw();
+    if (e.target.classList?.contains('gn-always')) { settings.showAlwaysItems = e.target.checked; saveSettings(); draw(); }
+  });
+  m.addEventListener('toggle', (e) => { const d = e.target; if (d.classList?.contains('gn-sec')) { if (d.open) closedSecs.delete(d.dataset.sec); else closedSecs.add(d.dataset.sec); } }, true);
   m.addEventListener('click', (e) => {
     if (e.target === m) { close(); return; }
     const b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.gk) { change([b.dataset.gk], b.dataset.on === '1'); return; }
+    if (b.closest('summary')) e.preventDefault(); // a button in a section header doesn't fold the section
+    if (b.dataset.gk) { change([b.dataset.gk], !on.has(b.dataset.gk)); return; }
     if (b.dataset.gbulk) {
       const wantOn = b.dataset.gbulk === '1';
-      const keys = cat.filter((i) => i.subject === b.dataset.subject && i.offered && match(i)).map((i) => notifKey({ subject: i.subject, itemId: i.id })).filter((k) => on.has(k) !== wantOn);
+      const keys = (shownKeys.get(b.dataset.shop) ?? []).filter((k) => on.has(k) !== wantOn);
       if (!keys.length) return;
-      if (keys.length > 5 && !confirm(`${wantOn ? 'Turn on' : 'Turn off'} notifications for ${keys.length} items?`)) return;
+      if (keys.length > 5 && !confirm(`${wantOn ? 'Turn on' : 'Turn off'} ${keys.length} notifications?`)) return;
       change(keys, wantOn); return;
     }
     if (b.dataset.m === 'alloff') {
@@ -4041,10 +4513,10 @@ async function openGameNotifs() {
   q.focus();
   try {
     const r = await notifRequest('/notifications/subscriptions');
-    subs = Array.isArray(r?.subscriptions) ? r.subscriptions.filter((s) => s && typeof s.subject === 'string') : [];
-    subs.forEach((s) => on.add(notifKey(s)));
+    subs = Array.isArray(r?.subscriptions) ? r.subscriptions.filter((x) => x && typeof x.subject === 'string') : [];
+    subs.forEach((x) => on.add(notifKey(x)));
   } catch (e) { err = `Couldn't read your notifications: ${e.message}`; }
-  if (!cat.length && !err) err = "The game's item list hasn't loaded yet (it comes from mg-api.ariedam.fr); try again in a moment.";
+  if (!allShopItems().length && !err) err = "The game's item list hasn't loaded yet (it comes from mg-api.ariedam.fr); try again in a moment.";
   draw();
 }
 // Alerts → phone app: when an item's alert changes in this mod (menu, Shop tab bell, Arie's import, reset, rarity
@@ -4223,6 +4695,46 @@ async function putOutCrystal() {
   await game.waitFor(() => crystalOut(), 3000);
   return { ok: crystalOut(), reason: crystalOut() ? null : 'it was sent but has not shown up yet' };
 }
+// ---------- Strength Crystal left out: its time only runs down while it's placed ----------
+// The +10 STR is for one-time jobs (hatching, selling pets). Out with none of those for a while (your setting, 10 min by
+// default), a note offers to pick it up for you; picked up, it keeps the time it has left. Picking up is the game's own
+// PickupCrystal (the new item's id is made by the client, as in Arie's MG-Websocket-Helper); placing it back is the
+// usual offer when you next hatch or sell. Nothing happens unless you press the button.
+const CRYSTAL_USES = new Set(['HatchEgg', 'SellPet', 'SellAllPets']);
+(() => { // crystal idle note
+  let since = null, snoozedAt = 0, busy = false;
+  net.onSent((cmd) => { if (CRYSTAL_USES.has(cmd?.type)) { since = Date.now(); snoozedAt = 0; document.querySelectorAll('.mgpc-toast[data-key="crystalidle"]').forEach((x) => x.remove()); } });
+  const fmt = (sec) => { const m = Math.round(sec / 60); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m} min`; };
+  const pickUp = async (note) => {
+    if (busy) return; busy = true;
+    const st = note.querySelector('.st'); if (st) st.textContent = 'Picking it up…';
+    try {
+      const spot = game.readPets(settings.gardenOwner)?.strengthSpot;
+      if (!spot) { if (st) st.textContent = 'It isn\'t out any more.'; return; }
+      const uuid = W.crypto?.randomUUID ? W.crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+      const r = await net.send({ type: 'PickupCrystal', tileType: spot.tileType, localTileIndex: spot.index, crystalType: 'Strength', itemId: uuid });
+      if (r.ok) { await game.waitFor(() => !crystalOut(), 3000); note.remove(); toast('💎 Strength Crystal picked up: it keeps the time it had left. The mod offers to put it back out when you next hatch or sell pets.', { key: 'crystalidle', ms: 12000 }); }
+      else if (st) st.textContent = `The game refused it (${r.reason || r.code}); is your inventory full?`;
+    } finally { busy = false; }
+  };
+  const tick = () => {
+    try {
+      if (settings.crystalIdleWarn === false || !document.body) return;
+      const left = game.readPets(settings.gardenOwner)?.strengthCrystal ?? 0;
+      if (!(left > 0)) { since = null; snoozedAt = 0; return; }
+      if (since == null) since = Date.now(); // seen out (just placed, or already out when the page loaded)
+      const mins = Math.max(1, Number(settings.crystalIdleMin) || 10);
+      const idleFor = Date.now() - Math.max(since, snoozedAt);
+      if (idleFor < mins * 60000 || document.querySelector('.mgpc-toast[data-key="crystalidle"]')) return;
+      const t = toast(`<b>💎 Strength Crystal is out with nothing to boost:</b> no hatching or pet selling for ${Math.round((Date.now() - since) / 60000)} min, and its time runs down while it's placed (${fmt(left)} left). <button class="mini" data-cpick>Pick it up</button><button class="mini" data-ckeep title="Ask again after another ${mins} min">Keep it out</button><button class="mini" data-cnever title="Settings → Features">Don't warn again</button> <span class="muted st"></span>`, { key: 'crystalidle', ms: 10 * 60000 });
+      t.querySelector('[data-cpick]').onclick = (e) => { if (e.isTrusted || TEST_BUILD) pickUp(t); };
+      t.querySelector('[data-ckeep]').onclick = () => { snoozedAt = Date.now(); t.remove(); };
+      t.querySelector('[data-cnever]').onclick = () => { settings.crystalIdleWarn = false; saveSettings(); t.remove(); try { render(); } catch {} };
+    } catch {}
+  };
+  setInterval(tick, 15000);
+  if (TEST_BUILD) W.__mglhCrystalIdle = { tick, age: (ms) => { since = Date.now() - ms; snoozedAt = 0; } };
+})();
 // Active pets with no ability for the task
 function idleForTask(task) {
   const d = game.readPets(settings.gardenOwner); if (!d) return [];
@@ -4639,9 +5151,17 @@ const keepAwake = (() => {
   };
   // browsers only let audio start after a click or key press
   const onGesture = () => { startAudio(); if (audio?.ctx.state !== 'running') audio?.ctx.resume?.().catch(() => {}); };
+  // Another mod keeps the page "visible" but may not tell the server you're still there (Garden Companion's background
+  // mode doesn't): the 60 s position ping runs on its own then
+  let soloPing = null;
+  const pingOnly = (want) => {
+    if (want && !soloPing && !on) soloPing = setInterval(() => net.pingPosition(), 60000);
+    if ((!want || on) && soloPing) { clearInterval(soloPing); soloPing = null; }
+  };
   return {
     get on() { return on; },
     othersHandleIt,
+    pingOnly,
     start() {
       if (on || othersHandleIt()) return; on = true;
       try { Object.defineProperty(docProto, 'hidden', { configurable: true, get: notHidden }); } catch {}
@@ -4681,13 +5201,37 @@ const pixi = { app: null, renderer: null };
   hook('__PIXI_APP_INIT__', (a) => { pixi.app = a; if (a?.renderer) pixi.renderer = a.renderer; });
   hook('__PIXI_RENDERER_INIT__', (r) => { pixi.renderer = r; });
 })();
+const pixiRenderer = () => pixi.renderer || pixi.app?.renderer || (() => { try { const d = W.__PIXI_DEVTOOLS__; return d?.renderers?.size ? [...d.renderers][0] : (d?.renderer ?? null); } catch { return null; } })();
+const pixiStage = () => { const r = pixiRenderer(); return r?.lastObjectRendered ?? r?.stage ?? pixi.app?.stage ?? null; };
+// A game window or sheet is open (inventory, shops, journal, …: the game's own isModalOrOverlayOpenAtom). What the mod
+// draws over the garden (plant card hint, riding hint, best-spot boxes) is hidden then, or it would sit on top of it.
+// Read at most every 250 ms.
+let overlayOpenAt = 0, overlayOpenWas = false;
+const gameOverlayOpen = () => {
+  if (Date.now() - overlayOpenAt < 250) return overlayOpenWas;
+  overlayOpenAt = Date.now();
+  try { overlayOpenWas = jotai.live(/^isModalOrOverlayOpenAtom$/) === true; } catch { overlayOpenWas = false; }
+  return overlayOpenWas;
+};
+// The mutation pictures: the game's mutation icons (sprite catalog mg-api.ariedam.fr/assets/sprites?cat=ui, game
+// version 1897: ui/MutationGold … ui/MutationAmbercharged; Dawnbound = Dawncharged, Amberbound = Ambercharged). If one
+// doesn't load, the weather mutations' own pictures under mutations/ (the game data's sprite, small particles), then
+// the emoji.
 const MUTATION_SPRITE = { Gold: 'Gold', Rainbow: 'Rainbow', Wet: 'Wet', Chilled: 'Chilled', Frozen: 'Frozen', Thunderstruck: 'Thunderstruck', Thundercharged: 'Thundercharged', Dawnlit: 'Dawnlit', Amberlit: 'Amberlit', Dawnbound: 'Dawncharged', Amberbound: 'Ambercharged' };
-const variantIconHtml = (v, px = 22) => MUTATION_SPRITE[v]
-  ? `<img src="https://mg-api.ariedam.fr/assets/sprites/ui/Mutation${MUTATION_SPRITE[v]}.png" alt="" style="width:${px}px;height:${px}px;object-fit:contain" onerror="this.replaceWith(document.createTextNode('${VARIANT_ICON[v] ?? ''}'))">`
-  : `<span style="font-size:${Math.round(px * 0.8)}px;line-height:${px}px">${VARIANT_ICON[v] ?? ''}</span>`;
+const variantIconHtml = (v, px = 22) => {
+  const k = MUTATION_SPRITE[v];
+  if (!k) return `<span style="font-size:${Math.round(px * 0.8)}px;line-height:${px}px">${VARIANT_ICON[v] ?? ''}</span>`;
+  const S = 'https://mg-api.ariedam.fr/assets/sprites/';
+  const alt = v === 'Gold' || v === 'Rainbow' ? '' : ` data-alt="${S}mutations/${k}.png"`;
+  return `<img src="${S}ui/Mutation${k}.png"${alt} alt="" style="width:${px}px;height:${px}px;object-fit:contain" onerror="if(this.dataset.alt){const a=this.dataset.alt;this.removeAttribute('data-alt');this.src=a}else this.replaceWith(document.createTextNode('${VARIANT_ICON[v] ?? ''}'))">`;
+};
+// Where the game's plant card is on the page, for what goes with it (the 🧼 bar): the middle of its top edge, or the
+// top of this hint when it's showing above the card. at: when it was seen.
+let plantCardAnchor = null;
 (() => { // plant card hint
+  if (TEST_BUILD) W.__mglhCardAnchor = (a) => (a === undefined ? plantCardAnchor : (plantCardAnchor = a));
   let box = null, cardSystem = null, lastFind = 0, lastKey = '';
-  const renderer = () => pixi.renderer || pixi.app?.renderer || (() => { try { const d = W.__PIXI_DEVTOOLS__; return d?.renderers?.size ? [...d.renderers][0] : (d?.renderer ?? null); } catch { return null; } })();
+  const renderer = pixiRenderer;
   const findIn = (root, pred, limit) => {
     const stack = [root]; let n = 0;
     while (stack.length && n++ < limit) { const x = stack.pop(); if (!x) continue; if (pred(x)) return x; if (Array.isArray(x.children)) for (const c of x.children) stack.push(c); }
@@ -4711,11 +5255,45 @@ const variantIconHtml = (v, px = 22) => MUTATION_SPRITE[v]
     for (const [sp, d] of Object.entries(plants)) if (String(d?.crop?.name ?? '').toLowerCase() === t || String(d?.plant?.name ?? '').toLowerCase() === t || sp.toLowerCase() === t) return sp;
     return (cropJournalState() ?? []).find((c) => c.name.toLowerCase() === t || c.sp.toLowerCase() === t)?.sp ?? null;
   };
+  // 🐾 Which pets eat a crop: a pet species eats it when the crop is in its diet (game data: pets[species].diet, the
+  // game's own check is an exact match of the crop's species). Your kinds of pet first (one out in the garden first, then
+  // the kinds you have most of; no count is shown), then the other species that eat it. Read at most once a second.
+  let petsCache = { sp: null, at: 0, html: '' };
+  const petsEating = (sp) => {
+    if (petsCache.sp === sp && Date.now() - petsCache.at < 1000) return petsCache.html;
+    const data = unwrapLive(liveData?.pets) ?? {};
+    const eaters = Object.keys(data).filter((k) => Array.isArray(data[k]?.diet) && data[k].diet.includes(sp));
+    let mine = [];
+    try { const id = game.myId(); mine = (id ? game.readPets(id)?.pets : null) ?? []; } catch {}
+    const groups = new Map();
+    for (const p of mine) {
+      if (!eaters.includes(p.species)) continue;
+      const g = groups.get(p.species) ?? { n: 0, out: 0 };
+      g.n++; if (p.loc === 'garden') g.out++;
+      groups.set(p.species, g);
+    }
+    const name = (k) => data[k]?.name ?? pretty(k);
+    const pic = (k) => { const s = data[k]?.sprite; return typeof s === 'string' && /^https:\/\/mg-api\.ariedam\.fr\//.test(s) ? `<img src="${esc(s)}" alt="" onerror="this.remove()">` : ''; };
+    const crop = esc(cropNameOf(sp));
+    let html;
+    if (!eaters.length) html = `<span class="m">No pet eats ${crop}.</span>`;
+    else {
+      const yours = [...groups].sort((a, b) => b[1].out - a[1].out || b[1].n - a[1].n || name(a[0]).localeCompare(name(b[0])));
+      const others = eaters.filter((k) => !groups.has(k)).map(name).sort();
+      html = (yours.length
+        ? `<span class="m">Your pets that eat it:</span>${yours.map(([k, g]) => `<span>${pic(k)}${esc(name(k))}${g.out ? ' (out)' : ''}</span>`).join('')}`
+        : `<span class="m">None of your pets eat ${crop}.</span>`)
+        + (others.length ? `<span class="m">${yours.length ? 'Also' : 'Eaten by'}: ${esc(others.slice(0, 6).join(', '))}${others.length > 6 ? ` +${others.length - 6}` : ''}</span>` : '');
+    }
+    petsCache = { sp, at: Date.now(), html };
+    return html;
+  };
+  const cropNameOf = (sp) => (unwrapLive(liveData?.plants) ?? {})[sp]?.crop?.name ?? pretty(sp);
   let iconRect = null; // where the card's plant picture is on the page (right-click toggles the hint)
   const tick = () => {
     iconRect = null;
     try {
-      if (!document.body) return hide();
+      if (!document.body || gameOverlayOpen()) return hide();
       const r = renderer(); if (!r) return hide();
       const stage = r.lastObjectRendered ?? r.stage ?? pixi.app?.stage; if (!stage) return hide();
       if (!cardSystem || cardSystem.destroyed || !cardSystem.parent) { if (Date.now() - lastFind < 2000) return hide(); lastFind = Date.now(); cardSystem = findSystem(stage); if (!cardSystem) return hide(); }
@@ -4732,7 +5310,8 @@ const variantIconHtml = (v, px = 22) => MUTATION_SPRITE[v]
       if (!card) return hide();
       { const cv = r.canvas || r.view, rc = cv?.getBoundingClientRect?.(), cb0 = card.getBounds?.();
         if (rc?.width && cb0) { const kx = rc.width / (r.screen?.width || cv.width), ky = rc.height / (r.screen?.height || cv.height);
-          iconRect = { left: rc.left + cb0.x * kx, top: rc.top + cb0.y * ky, right: rc.left + (cb0.x + Math.min(cb0.width, cb0.height)) * kx, bottom: rc.top + (cb0.y + cb0.height) * ky }; } }
+          iconRect = { left: rc.left + cb0.x * kx, top: rc.top + cb0.y * ky, right: rc.left + (cb0.x + Math.min(cb0.width, cb0.height)) * kx, bottom: rc.top + (cb0.y + cb0.height) * ky };
+          plantCardAnchor = { cx: rc.left + (cb0.x + cb0.width / 2) * kx, y: rc.top + cb0.y * ky - 8, at: Date.now() }; } }
       if (settings.featPlantHint === false) return hide();
       const st = cropJournalState(); const c = st?.find((x) => x.sp === sp); if (!c) return hide();
       const missing = CROP_VARIANTS.filter((v) => !c.logged.has(v));
@@ -4751,13 +5330,27 @@ const variantIconHtml = (v, px = 22) => MUTATION_SPRITE[v]
         cx = rect.left + (b.x + b.width / 2) * sx; top = rect.top + b.y * sy - (row !== card ? 12 : 0);
         if (row === card) cx = rect.left + (cb.x + cb.width / 2) * sx;
       }
-      if (!box) { box = document.createElement('div'); box.id = 'mgpc-planthint'; document.body.appendChild(box); }
-      const key = sp + '|' + missing.join(',');
+      if (!box) {
+        box = document.createElement('div'); box.id = 'mgpc-planthint'; document.body.appendChild(box);
+        // 🐾 is the only part that takes clicks (the rest lets them through to the game); its clicks stay here
+        for (const ev of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend']) box.addEventListener(ev, (e) => { if (e.target.closest?.('.pt')) e.stopPropagation(); });
+        box.addEventListener('click', (e) => {
+          if (!e.target.closest?.('.pt')) return;
+          e.stopPropagation(); e.preventDefault();
+          settings.plantHintPets = settings.plantHintPets !== true; saveSettings(); lastKey = ''; tick();
+          try { render(); } catch {}
+        });
+      }
+      const petsOn = settings.plantHintPets === true;
+      const pets = petsOn ? petsEating(sp) : '';
+      const key = sp + '|' + missing.join(',') + '|' + petsOn + '|' + pets;
       if (key !== lastKey) {
         lastKey = key;
-        box.innerHTML = missing.length
+        box.innerHTML = (missing.length
           ? `<span class="t">Not logged:</span>${missing.map((v) => `<span class="v" title="${esc(v)}">${variantIconHtml(v)}</span>`).join('')}`
-          : '<span class="t">✔ Every variant logged</span>';
+          : '<span class="t">✔ Every variant logged</span>')
+          + `<button type="button" class="pt${petsOn ? ' on' : ''}" aria-pressed="${petsOn}" title="${petsOn ? 'Hide' : 'Show'} the pets that eat this crop">🐾</button>`
+          + (petsOn ? `<div class="pets">${pets}</div>` : '');
       }
       box.style.display = 'flex';
       // Sit above whatever the game draws above the card (the crop's coin value, a mutation's name tooltip, …)
@@ -4779,7 +5372,13 @@ const variantIconHtml = (v, px = 22) => MUTATION_SPRITE[v]
         for (const [t, btm] of tops) if (btm > bottom - bh - 2 && t < bottom) bottom = t - 4; // stack upward past each overlap
         bottom = Math.max(bottom, top - 8 - 160);
       } catch {}
+      // Garden Companion's crop/egg rows (its page overlay, when it can't put them on the game's card) sit there too
+      try {
+        const gt = document.getElementById('gc-turtle'), g = gt?.getBoundingClientRect?.();
+        if (g && g.width && g.height && getComputedStyle(gt).display !== 'none' && g.right > cx - bw / 2 - 4 && g.left < cx + bw / 2 + 4 && g.bottom > bottom - bh - 2 && g.top < bottom) bottom = g.top - 4;
+      } catch {}
       box.style.left = Math.round(cx) + 'px'; box.style.top = Math.round(bottom) + 'px';
+      plantCardAnchor = { cx, y: bottom - (box.offsetHeight || bh) - 6, at: Date.now() };
     } catch { hide(); }
   };
   setInterval(tick, 200);
@@ -4834,49 +5433,756 @@ try { W.__mglhIdFromStore = () => { const v = jotai.live(/^playerIdAtom$/); if (
 // ---------- Riding a pet with a pressable crop ability: what pressing it would do where you stand ----------
 // Thundercharger: Thunderstruck crops in the 3×3 around you become Thundercharged (count of crops).
 // Dawn / Amber Capture: Dawn / Amber mutations in the 3×3 become capsules: lit = 1, charged (bound) = 2.
-// The 3×3 is the abilities' tileRadius 1; tiles are found through the game's map (grid → your dirt/boardwalk tiles).
+// As the game works it out (its pet ability code): you must stand on one of your own garden's tiles (dirt or
+// boardwalk); the area is the 3×3 around you (tileRadius 1, your tile included); only crops on dirt tiles count, and
+// not preserved ones; a Thunderstruck crop is charged only when it has no Wet / Chilled / Frozen / Thundercharged.
+// Tiles are found through the game's map (grid → your dirt/boardwalk tiles).
 const RIDE_ABILITIES = {
-  Thundercharger: { icon: '🌩️', name: 'Thundercharger', unit: (n) => `${n} crop${n === 1 ? '' : 's'} to charge`, count: (m) => (m.includes('Thunderstruck') ? 1 : 0), perSlot: true },
-  DawnCapture: { icon: '🌅', name: 'Dawn Capture', unit: (n) => `${n} Dawn capsule${n === 1 ? '' : 's'}`, count: (m) => (m.includes('Dawncharged') ? 2 : 0) + (m.includes('Dawnlit') ? 1 : 0) },
-  AmberCapture: { icon: '🟠', name: 'Amber Capture', unit: (n) => `${n} Amber capsule${n === 1 ? '' : 's'}`, count: (m) => (m.includes('Ambercharged') ? 2 : 0) + (m.includes('Ambershine') ? 1 : 0) },
+  Thundercharger: { icon: '🌩️', color: '#ffd65a', name: 'Thundercharger', unit: (n) => `${n} crop${n === 1 ? '' : 's'} to charge`, count: (m) => (m.includes('Thunderstruck') && !m.some((x) => x === 'Wet' || x === 'Chilled' || x === 'Frozen' || x === 'Thundercharged') ? 1 : 0), kinds: [['Thunderstruck', 'Thunderstruck']], perSlot: true },
+  DawnCapture: { icon: '🌅', color: '#f59be1', name: 'Dawn Capture', unit: (n) => `${n} Dawn capsule${n === 1 ? '' : 's'}`, count: (m) => (m.includes('Dawncharged') ? 2 : 0) + (m.includes('Dawnlit') ? 1 : 0), kinds: [['Dawnlit', 'Dawnlit'], ['Dawncharged', 'Dawnbound']] },
+  AmberCapture: { icon: '🟠', color: '#ffb478', name: 'Amber Capture', unit: (n) => `${n} Amber capsule${n === 1 ? '' : 's'}`, count: (m) => (m.includes('Ambercharged') ? 2 : 0) + (m.includes('Ambershine') ? 1 : 0), kinds: [['Ambershine', 'Amberlit'], ['Ambercharged', 'Amberbound']], keepRare: true },
 };
+// The patches' rare crops (the game's own table): a Daisy Patch can grow Purple Daisies, and so on. A tile whose crops
+// are all rare ones (or a rare crop planted on its own) is "rare only"; with 🎯 keeping them, no spot is picked whose
+// 3×3 would take Amber off such a tile (the game takes it off every crop in the 3×3, there's no leaving one out).
+const RARE_PATCH_CROPS = { PurpleDaisy: 'Daisy', FourLeafClover: 'Clover', SnowdropDouble: 'Snowdrop', VariegatedCattail: 'Cattail', Embercrown: 'Emberbloom', Witchfire: 'Foxfire' };
+const isRareOnlyTile = (t) => {
+  if (t?.objectType !== 'plant') return false;
+  const crops = (t.slots ?? []).filter((sl) => sl?.species);
+  return crops.length > 0 && crops.every((sl) => RARE_PATCH_CROPS[sl.species] || (t.species && sl.species !== t.species));
+};
+const cropName = (sp) => unwrapLive(liveData?.plants)?.[sp]?.crop?.name ?? pretty(sp);
+const MAP_ATOM_RE = /^(?:room|garden)?[Mm]ap(?:Data)?Atom$/;
+// where you stand: the store's value only (its init is just the spawn point), else what the game last sent
+const playerPos = () => { const p = jotai.live(/^positionAtom$/); return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : game.lastPosition(); };
+// What one tile's crops give: n (capsules / crops to charge) and crops per mutation (by)
+const rideTileValue = (def, t) => {
+  const out = { n: 0, by: {} };
+  if (t?.objectType !== 'plant') return out;
+  for (const sl of t.slots ?? []) {
+    if (!sl || sl.preserved) continue;
+    const m = Array.isArray(sl.mutations) ? sl.mutations : [];
+    const c = def.count(m); if (!c) continue;
+    out.n += c;
+    for (const [k] of def.kinds) if (m.includes(k)) out.by[k] = (out.by[k] ?? 0) + 1;
+  }
+  if (out.n && def.keepRare && settings.bestSpotKeepRare !== false && isRareOnlyTile(t)) out.keep = cropName(t.slots.find((sl) => sl?.species).species);
+  return out;
+};
+// Every tile you could press it from (your dirt and boardwalk tiles) and what the 3×3 around each gives.
+// at(x, y): that spot (null if it isn't one of your tiles: the game does nothing there); keep lists the rare-only
+// tiles in it that would lose something. best(pos): the spot giving the most, leaving out spots with a keep; ties go
+// to the one nearest pos. null when nothing anywhere would count. kept: how many rare-only tiles are kept.
+const rideSpots = (ability, r, map) => {
+  const def = RIDE_ABILITIES[ability];
+  if (!def || !r?.garden || !(map?.cols > 0) || !(map?.rows > 0)) return null;
+  const cols = map.cols, rows = map.rows, dirt = map.globalTileIdxToDirtTile ?? {}, walk = map.globalTileIdxToBoardwalk ?? {};
+  const val = new Map(), centres = new Set();
+  for (const k of Object.keys(dirt)) {
+    const d = dirt[k]; if (d?.dirtTileIdx == null || d.userSlotIdx !== r.slotIdx) continue;
+    centres.add(+k);
+    const v = rideTileValue(def, r.garden.tileObjects?.[d.dirtTileIdx]); if (v.n) val.set(+k, v);
+  }
+  for (const k of Object.keys(walk)) { const b = walk[k]; if (b?.boardwalkTileIdx != null && b.userSlotIdx === r.slotIdx) centres.add(+k); }
+  const score = (x, y) => {
+    const s = { x, y, n: 0, by: {}, keep: [] };
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      const v = val.get(nx + ny * cols); if (!v) continue;
+      s.n += v.n; for (const [k, c] of Object.entries(v.by)) s.by[k] = (s.by[k] ?? 0) + c;
+      if (v.keep) s.keep.push(v.keep);
+    }
+    return s;
+  };
+  const at = (x, y) => (Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < cols && y < rows && centres.has(x + y * cols) ? score(x, y) : null);
+  const best = (pos) => {
+    if (!val.size) return null;
+    const px = pos ? Math.round(pos.x) : 0, py = pos ? Math.round(pos.y) : 0;
+    const dist = (s) => (pos ? Math.hypot(s.x - px, s.y - py) : 0);
+    let b = null, ties = 0;
+    for (const g of centres) {
+      const s = score(g % cols, Math.floor(g / cols));
+      if (s.keep.length) continue;
+      if (!b || s.n > b.n) { b = s; ties = 1; } else if (s.n === b.n) { ties++; if (dist(s) < dist(b)) b = s; }
+    }
+    return b && b.n > 0 ? { ...b, ties } : null;
+  };
+  let kept = 0; for (const v of val.values()) if (v.keep) kept++;
+  return { def, at, best, kept };
+};
+const KEEP_NOTE = (names) => `takes Amber off ${[...new Set(names)].join(', ')} (rare crops only on ${names.length === 1 ? 'that tile' : 'those tiles'})`;
+// "3 Dawnlit + 2 Dawnbound crops" (Thundercharger: the count already is crops)
+const rideBreakdown = (def, by) => (def.kinds.length > 1 ? def.kinds.filter(([k]) => by[k]).map(([k, nm]) => `${by[k]} ${nm}`).join(' + ') + ' crop' + (def.kinds.reduce((t, [k]) => t + (by[k] ?? 0), 0) === 1 ? '' : 's') : '');
+// Your pets out with that ability: ready, recharging (the game's cooldown, counted down here between its updates), hungry
+const rideCooldownSeen = new Map();
+const rideCooldownLeft = (pet, ab) => {
+  const v = Number(pet?.abilityCooldowns?.[ab] ?? 0) || 0, key = pet?.id + ':' + ab, now = Date.now();
+  let c = rideCooldownSeen.get(key); if (!c || c.v !== v) { c = { v, at: now }; rideCooldownSeen.set(key, c); }
+  return Math.max(0, v - (now - c.at));
+};
+const ridePetStatus = (ability, r) => {
+  const def = RIDE_ABILITIES[ability];
+  const pets = (r?.pets ?? []).filter((p) => (p.abilities ?? []).includes(ability));
+  if (!pets.length) return `None of your pets out has ${def.name}.`;
+  return pets.map((p) => {
+    const nm = p.name || unwrapLive(liveData?.pets)?.[p.petSpecies]?.name || pretty(p.petSpecies);
+    const left = rideCooldownLeft(p, ability), sec = Math.ceil(left / 1000);
+    const st = Number.isFinite(p.hunger) && p.hunger <= 0 ? 'hungry: feed it first'
+      : left > 0 ? `recharging, about ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')} left`
+      : r.petId === p.id ? 'ready (you\'re riding it)' : 'ready: ride it to use it';
+    return `${nm}: ${st}`;
+  }).join(' · ');
+};
+// The riding hint and the 🧼 bar sit just under your character (the bottom edge of the tile you're on, as the game
+// draws it), away from the game's buttons along the top; kept on screen. If where you are can't be worked out, they go
+// back to the top of the screen. below: the height of what's already there (the riding hint, for the 🧼 bar).
+function placeUnderPlayer(el, pos, below) {
+  const at = pos && Number.isFinite(pos.x) && Number.isFinite(pos.y) ? spotMarks.pageOf(Math.round(pos.x) + 0.5, Math.round(pos.y) + 1) : null;
+  if (!at || !Number.isFinite(at.x) || !Number.isFinite(at.y)) { if (el.style.top) { el.style.left = ''; el.style.top = ''; } return false; }
+  const half = (el.offsetWidth || 0) / 2;
+  const x = Math.round(Math.min(Math.max(at.x, half + 8), innerWidth - half - 8));
+  const y = Math.round(Math.min(Math.max(at.y + 8 + below, 8), innerHeight - (el.offsetHeight || 0) - 8));
+  if (el.style.left !== x + 'px') el.style.left = x + 'px';
+  if (el.style.top !== y + 'px') el.style.top = y + 'px';
+  return true;
+}
 (() => { // riding hint
   let box = null, lastHtml = '';
   const hide = () => { if (box) box.style.display = 'none'; lastHtml = ''; };
   const tick = () => {
     try {
-      if (settings.featMountHint === false || !document.body) return hide();
+      if (settings.featMountHint === false || !document.body || gameOverlayOpen()) return hide();
       const r = game.riding(settings.gardenOwner); if (!r?.petId) return hide();
       const pet = r.pets.find((p) => p.id === r.petId); if (!pet) return hide();
       const abs = (pet.abilities ?? []).filter((a) => RIDE_ABILITIES[a]); if (!abs.length) return hide();
-      const map = jotai.read(/^(?:room|garden)?[Mm]ap(?:Data)?Atom$/);
-      const posA = jotai.live(/^positionAtom$/); // the store value only (its init is just the spawn point)
-      const pos = posA && Number.isFinite(posA.x) ? posA : game.lastPosition();
+      const map = jotai.read(MAP_ATOM_RE);
+      const pos = playerPos();
       if (!map?.cols || !pos || !r.garden) return hide();
       const px = Math.round(pos.x), py = Math.round(pos.y);
-      const seen = new Set(), tiles = [];
-      for (let dy = -1; dy <= 1; dy++) { for (let dx = -1; dx <= 1; dx++) {
-        const x = px + dx, y = py + dy; if (x < 0 || y < 0 || x >= map.cols || y >= map.rows) continue;
-        const g = x + y * map.cols;
-        const d = map.globalTileIdxToDirtTile?.[g], b = map.globalTileIdxToBoardwalk?.[g];
-        if (d?.dirtTileIdx != null && (d.userSlotIdx == null || d.userSlotIdx === r.slotIdx) && !seen.has('d' + d.dirtTileIdx)) { seen.add('d' + d.dirtTileIdx); tiles.push(r.garden.tileObjects?.[d.dirtTileIdx]); }
-        if (b?.boardwalkTileIdx != null && (b.userSlotIdx == null || b.userSlotIdx === r.slotIdx) && !seen.has('b' + b.boardwalkTileIdx)) { seen.add('b' + b.boardwalkTileIdx); tiles.push(r.garden.boardwalkTileObjects?.[b.boardwalkTileIdx]); }
-      } }
-      const slots = tiles.filter((t) => t?.objectType === 'plant').flatMap((t) => (t.slots ?? []).filter(Boolean));
-      const parts = abs.map((a) => { const def = RIDE_ABILITIES[a]; const n = slots.reduce((t, sl) => t + def.count(sl.mutations ?? []), 0); return `<span class="v">${def.icon} ${esc(def.name)}: <b>${esc(def.unit(n))}</b></span>`; });
+      const parts = abs.map((a) => {
+        const sp = rideSpots(a, r, map); if (!sp) return '';
+        const here = sp.at(px, py);
+        if (!here) return `<span class="v">${sp.def.icon} ${esc(sp.def.name)}: <b>stand on your garden</b></span>`;
+        let best = '';
+        if (settings.bestSpotRide !== false) { const b = sp.best(pos); if (b && (b.n > here.n || here.keep.length)) best = ` <span class="bs">· best spot: ${esc(String(b.n))} (marked 🎯)</span>`; else if (b) best = ' <span class="bs">· the best spot ✓</span>'; }
+        const warn = here.keep.length ? ` <span class="warn">⚠ ${esc(KEEP_NOTE(here.keep))}</span>` : '';
+        return `<span class="v">${sp.def.icon} ${esc(sp.def.name)}: <b>${esc(sp.def.unit(here.n))}</b>${warn}${best}</span>`;
+      }).filter(Boolean);
+      if (!parts.length) return hide();
       if (!box) { box = document.createElement('div'); box.id = 'mgpc-mounthint'; document.body.appendChild(box); }
       const html = `<span class="t">Here:</span>${parts.join('')}`;
       if (html !== lastHtml) { box.innerHTML = html; lastHtml = html; }
       box.style.display = 'flex';
+      placeUnderPlayer(box, pos, 0);
     } catch { hide(); }
   };
   setInterval(tick, 300);
   return { tick };
 })();
+// ---------- 🎯 Best-spot boxes ----------
+// A box over the 3×3 and a stronger one over the tile to stand on, labelled with the count. Two users: the garden
+// search's 🎯 Best spot, and riding a pet with one of these abilities (by itself).
+// Drawn in the game's own world layer when it can be (with the game's own Graphics and Text classes, found by what
+// they can do): then it sits above the plants and under the game's name labels and all of its windows, cards and
+// menus, and moves with the camera by itself. It's one container labelled "MGLH best spot" in the game's "World", just
+// under its "WorldOverlay"; nothing of the game's is changed. If that can't be done, the box is drawn on the page over
+// the game as before (which can cover the game's cards). Either way, a spot off screen gets an arrow at the screen's edge.
+// Positions come from the game's tile drawings ("Tile (x, y)" nodes sit at their tile's middle, 256 world units a tile).
+const nextFrame = (f) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(f) : setTimeout(f, 33));
+const spotMarks = (() => {
+  const want = new Map(); // owner ('search' / 'ride') → [{ ab, x, y, n, extra }]
+  const els = new Map(); // ability → its page box (fallback, and the off-screen arrow)
+  const pix = new Map(); // ability → { c (container), g, t, key }
+  let ref = null, refAt = 0, raf = 0, Gfx = null, Txt = null, ctorAt = 0;
+  const TILE_RE = /^Tile \((\d+), (\d+)\)$/;
+  const findRef = () => {
+    if (ref && !ref.node.destroyed && ref.node.parent && Date.now() - refAt < 5000) return ref;
+    ref = null; const stage = pixiStage(); if (!stage) return null;
+    const stack = [stage]; let n = 0;
+    while (stack.length && n++ < 250000) {
+      const x = stack.pop(); if (!x) continue;
+      const m = typeof x.label === 'string' ? TILE_RE.exec(x.label) : null;
+      if (m && typeof x.toGlobal === 'function') { ref = { node: x, x: +m[1], y: +m[2] }; refAt = Date.now(); return ref; }
+      if (Array.isArray(x.children)) for (const c of x.children) stack.push(c);
+    }
+    return null;
+  };
+  // the game's Graphics (rect / stroke / fill / clear and a drawing context) and Text classes, from things it draws
+  const findCtors = () => {
+    if (Gfx || Date.now() - ctorAt < 5000) return; ctorAt = Date.now();
+    const stage = pixiStage(); if (!stage) return;
+    const stack = [stage]; let n = 0;
+    while (stack.length && n++ < 250000 && (!Gfx || !Txt)) {
+      const x = stack.pop(); if (!x) continue;
+      if (!Gfx && x.context && (x.renderPipeId ?? 'graphics') === 'graphics' && ['rect', 'stroke', 'fill', 'clear'].every((k) => typeof x[k] === 'function')) Gfx = x.constructor;
+      if (!Txt && x.renderPipeId === 'text' && typeof x.text === 'string' && x.style && typeof x.style === 'object') Txt = x.constructor; // not bitmap or HTML text
+      if (Array.isArray(x.children)) for (const c of x.children) stack.push(c);
+    }
+  };
+  const worldOf = (node) => { for (let p = node?.parent; p; p = p.parent) if (p.label === 'World' && typeof p.addChild === 'function' && typeof p.toLocal === 'function') return p; return null; };
+  // a point in tile units (x.5 = a tile's middle… as the game's tile drawings: middle at 256·x + 128) on the page
+  const pageOf = (tx, ty) => {
+    const r = findRef(), rr = pixiRenderer(), cv = rr?.canvas || rr?.view, rc = cv?.getBoundingClientRect?.();
+    if (!r || !rc?.width) return null;
+    const g = r.node.toGlobal({ x: (tx - r.x - 0.5) * 256, y: (ty - r.y - 0.5) * 256 });
+    return { x: rc.left + g.x * (rc.width / (rr.screen?.width || cv.width)), y: rc.top + g.y * (rc.height / (rr.screen?.height || cv.height)) };
+  };
+  const ARROWS = ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗'];
+  const hideEl = (el) => { el.style.display = 'none'; el._mgCss = ''; };
+  const hidePix = (e) => { try { if (e.c && !e.c.destroyed) e.c.visible = false; } catch {} };
+  const tagText = (def, m) => `${def.icon} ${m.n}${m.extra ? ' · ' + m.extra : ''}`;
+  // drawn in the game's World: returns false if it can't be
+  const drawPixi = (ab, m, r, def) => {
+    findCtors();
+    const world = Gfx ? worldOf(r.node) : null; if (!world) return false;
+    let e = pix.get(ab);
+    if (e && (e.c.destroyed || e.c.parent !== world)) { try { if (!e.c.destroyed) e.c.destroy({ children: true }); } catch {} pix.delete(ab); e = null; }
+    if (!e) {
+      const C = world.constructor, c = new C({ label: 'MGLH best spot', eventMode: 'none' });
+      const g = c.addChild(new Gfx());
+      let t = null;
+      try { if (Txt) { t = new Txt({ text: '', style: { fontFamily: 'system-ui, sans-serif', fontSize: 84, fontWeight: '800', fill: def.color, stroke: { color: 0x14161a, width: 14 } } }); if (typeof t.text !== 'string' || !t.position) t = null; else { t.anchor?.set?.(0.5, 1); c.addChild(t); } } } catch { t = null; }
+      const over = world.children?.find((x) => x?.label === 'WorldOverlay');
+      c.zIndex = Number.isFinite(over?.zIndex) ? over.zIndex - 1 : 1e6;
+      world.addChild(c);
+      e = { c, g, t, key: '' }; pix.set(ab, e);
+    }
+    const key = `${m.x},${m.y},${m.n},${m.extra},${r.x},${r.y}`;
+    if (e.key !== key) {
+      e.key = key;
+      // the 3×3's corners and the middle tile's, from the tiles' layer into the World's own units
+      const tl = r.node.parent, at = (dx, dy) => world.toLocal({ x: (m.x - r.x) * 256 + r.node.position.x - 128 + dx * 256, y: (m.y - r.y) * 256 + r.node.position.y - 128 + dy * 256 }, tl);
+      const a = at(-1, -1), z = at(2, 2), ma = at(0, 0), mz = at(1, 1), col = parseInt(def.color.slice(1), 16);
+      const g = e.g; g.clear();
+      g.rect(a.x, a.y, z.x - a.x, z.y - a.y).fill({ color: col, alpha: 0.07 }).stroke({ width: 10, color: col, alpha: 0.9 });
+      g.rect(ma.x, ma.y, mz.x - ma.x, mz.y - ma.y).fill({ color: col, alpha: 0.18 }).stroke({ width: 22, color: col, alpha: 1 });
+      if (e.t) { e.t.text = tagText(def, m); e.t.position.set((a.x + z.x) / 2, a.y - 16); }
+    }
+    e.c.visible = true;
+    return true;
+  };
+  const draw = () => {
+    const all = new Map();
+    for (const list of want.values()) for (const m of list) if (!all.has(m.ab)) all.set(m.ab, m);
+    for (const [ab, el] of els) if (!all.has(ab) && el.style.display !== 'none') hideEl(el);
+    for (const [ab, e] of pix) if (!all.has(ab)) hidePix(e);
+    if (!all.size) return false;
+    const r = findRef(), rr = pixiRenderer(), cv = rr?.canvas || rr?.view, rc = cv?.getBoundingClientRect?.();
+    if (!r || !rc?.width || !document.body || gameOverlayOpen()) { for (const el of els.values()) hideEl(el); for (const e of pix.values()) hidePix(e); return true; }
+    const kx = rc.width / (rr.screen?.width || cv.width), ky = rc.height / (rr.screen?.height || cv.height);
+    const vw = innerWidth, vh = innerHeight;
+    for (const [ab, m] of all) {
+      const def = RIDE_ABILITIES[ab];
+      const ox = (m.x - r.x) * 256, oy = (m.y - r.y) * 256;
+      const a = r.node.toGlobal({ x: ox - 384, y: oy - 384 }), z = r.node.toGlobal({ x: ox + 384, y: oy + 384 });
+      const L = rc.left + a.x * kx, T = rc.top + a.y * ky, w3 = (z.x - a.x) * kx, h3 = (z.y - a.y) * ky, cx = L + w3 / 2, cy = T + h3 / 2;
+      const off = cx < 0 || cy < 0 || cx > vw || cy > vh;
+      let inGame = false;
+      try { inGame = drawPixi(ab, m, r, def); } catch { inGame = false; }
+      if (inGame && !off && pix.get(ab)?.t) { const el = els.get(ab); if (el && el.style.display !== 'none') hideEl(el); continue; }
+      let el = els.get(ab);
+      if (!el) { el = document.createElement('div'); el.className = 'mgpc-bestspot'; el.dataset.ab = ab; el.innerHTML = '<div class="mid"></div><span class="tag"></span>'; document.body.appendChild(el); els.set(ab, el); }
+      let tag = tagText(def, m), css;
+      if (!off) css = `--c:${def.color};display:block;left:${Math.round(L)}px;top:${Math.round(T)}px;width:${Math.round(w3)}px;height:${Math.round(h3)}px`;
+      else {
+        const ang = Math.atan2(cy - vh / 2, cx - vw / 2);
+        tag = `${ARROWS[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8]} ${tag}`;
+        css = `--c:${def.color};display:block;left:${Math.round(Math.min(Math.max(cx, 60), vw - 60))}px;top:${Math.round(Math.min(Math.max(cy, 20), vh - 20))}px`;
+      }
+      el.classList.toggle('off', off);
+      el.classList.toggle('tagonly', inGame && !off); // the box is in the game; only its label on the page
+      if (el._mgCss !== css) { el._mgCss = css; el.style.cssText = css; }
+      const te = el.querySelector('.tag'); if (te.textContent !== tag) te.textContent = tag;
+    }
+    return true;
+  };
+  const loop = () => { raf = 0; let any = false; try { any = draw(); } catch {} if (any) raf = nextFrame(loop); };
+  const set = (owner, list) => {
+    want.set(owner, list ?? []);
+    if (!raf) { let any = false; try { any = draw(); } catch {} if (any) raf = nextFrame(loop); }
+  };
+  if (TEST_BUILD) W.__mglhSpotPix = () => [...pix].map(([ab, e]) => ({ ab, visible: !!e.c.visible, parent: e.c.parent?.label, z: e.c.zIndex, text: e.t?.text ?? null, ops: e.g.ops ?? null }));
+  return { set, pageOf };
+})();
+// Riding a pet with Dawn Capture / Amber Capture / Thundercharger: its best spot is marked by itself (the box's label
+// adds the time left while it recharges, or "hungry"). Nothing is faded. Settings → Features → 🎯 …while riding.
+(() => {
+  setInterval(() => {
+    try {
+      if (settings.bestSpotRide === false) return spotMarks.set('ride', []);
+      const r = game.riding(settings.gardenOwner), pet = r?.petId ? r.pets.find((p) => p.id === r.petId) : null;
+      const abs = (pet?.abilities ?? []).filter((a) => RIDE_ABILITIES[a]);
+      if (!abs.length) return spotMarks.set('ride', []);
+      const map = jotai.read(MAP_ATOM_RE), pos = playerPos(), list = [];
+      for (const a of abs) {
+        const b = rideSpots(a, r, map)?.best(pos); if (!b) continue;
+        const left = rideCooldownLeft(pet, a), sec = Math.ceil(left / 1000);
+        const extra = Number.isFinite(pet.hunger) && pet.hunger <= 0 ? 'hungry' : left > 0 ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : '';
+        list.push({ ab: a, x: b.x, y: b.y, n: b.n, extra });
+      }
+      spotMarks.set('ride', list);
+    } catch { spotMarks.set('ride', []); }
+  }, 400);
+})();
+// ---------- 🧼 Cleanse all of this kind (holding a Crop Cleanser) ----------
+// Like QPM's Super Cleanser: holding a Crop Cleanser on one of your plants, the crop you're on (the one the game's card
+// shows) sets the kind: its weather mutations. A button cleanses every crop on that plant with exactly the same weather
+// mutations, one Crop Cleanser each (the game's own CropCleanser command, one at a time, each answered before the next).
+// The Crop Cleanser removes weather mutations only (Wet, Chilled, Frozen, Thunderstruck, Thundercharged, Dawnlit,
+// Amberlit, Dawnbound, Amberbound: the game's list); Gold and Rainbow stay. Left out, as the game would refuse or ask:
+// preserved crops, a plant that isn't fully grown (multi-harvest), and a crop whose weather mutation isn't in your
+// journal yet (the game asks "Cleanse anyway" for those; here they're simply not touched). Two clicks: the first
+// shows how many, the second cleanses. Nothing happens unless you're holding the Crop Cleanser yourself.
+const WEATHER_MUTATIONS = ['Wet', 'Chilled', 'Frozen', 'Thunderstruck', 'Dawnlit', 'Ambershine', 'Dawncharged', 'Ambercharged', 'Thundercharged'];
+const weatherOf = (m) => (Array.isArray(m) ? m : []).filter((x) => WEATHER_MUTATIONS.includes(x));
+const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+// Which crops: by default the ones like the crop on the game's card (exactly its weather mutations; ‹ › on the card
+// picks another). Or, as in the garden search's Filters: crops with any / all of picked mutations (weather ones, and
+// Gold / Rainbow to narrow it down); a crop needs a weather mutation to be cleansed at all.
+// pick: Set of mutation names as the journal calls them (Amberlit, Dawnbound, …); all: true for "all of".
+const CLEANSE_CHIPS = ['Gold', 'Rainbow', 'Wet', 'Chilled', 'Frozen', 'Thunderstruck', 'Thundercharged', 'Dawnlit', 'Amberlit', 'Dawnbound', 'Amberbound'];
+const cleanseMatcher = (pick, all, kind) => (sl) => {
+  const w = weatherOf(sl?.mutations); if (!w.length) return false;
+  if (!pick?.size) return kind.length > 0 && sameSet(w, kind);
+  const has = new Set((sl.mutations ?? []).map((m) => canonVariant(m)));
+  return all ? [...pick].every((m) => has.has(m)) : [...pick].some((m) => has.has(m));
+};
+// The plant you stand on in your own garden, the crop you're on, and what cleansing would take
+function cleansePlan(pick = new Set(), all = false) {
+  if (jotai.live(/^mySelectedItemIdAtom$/) !== 'CropCleanser') return null;
+  const r = game.riding(); if (!r?.garden) return null; // your own garden, whatever garden the mod is set to read
+  let tileIdx = jotai.live(/^myOwnCurrentDirtTileIndexAtom$/);
+  if (!Number.isInteger(tileIdx)) { // the game's atom missing: worked out from where you stand
+    const map = jotai.read(MAP_ATOM_RE), pos = playerPos();
+    const d = map?.cols && pos ? map.globalTileIdxToDirtTile?.[Math.round(pos.x) + Math.round(pos.y) * map.cols] : null;
+    tileIdx = d?.userSlotIdx === r.slotIdx ? d.dirtTileIdx : null;
+  }
+  const t = Number.isInteger(tileIdx) ? r.garden.tileObjects?.[tileIdx] : null;
+  if (t?.objectType !== 'plant') return null;
+  const slots = (t.slots ?? []).filter((sl) => sl && Number.isInteger(sl.slotId));
+  const withWeather = slots.filter((sl) => weatherOf(sl.mutations).length);
+  const selId = jotai.live(/^selectedCropSlotIdAtom$/);
+  const kind = weatherOf(slots.find((sl) => sl.slotId === selId)?.mutations);
+  // the mutations on this plant's crops (and any picked), for the chips
+  const seen = new Set([...pick]); for (const sl of withWeather) for (const m of sl.mutations ?? []) seen.add(canonVariant(m));
+  const present = CLEANSE_CHIPS.filter((m) => seen.has(m));
+  const harvest = unwrapLive(liveData?.plants)?.[t.species]?.plant?.harvestType;
+  const grown = harvest === 'Single' || !(Number(t.maturedAt) > Date.now());
+  const cj = game.readPets()?.cropJournal ?? null;
+  const unlogged = (sl) => { const logged = new Set((cj?.[sl.species]?.variantsLogged ?? []).map((x) => canonVariant(x?.variant ?? x))); return weatherOf(sl.mutations).filter((m) => !logged.has(canonVariant(m))); };
+  const match = cleanseMatcher(pick, all, kind);
+  const like = slots.filter(match);
+  const out = { tileIdx, species: t.species, kind, present, cleanable: withWeather.length, grown, like: like.length, go: [], preserved: 0, notLogged: new Set(), notLoggedN: 0 };
+  for (const sl of like) {
+    if (sl.preserved) { out.preserved++; continue; }
+    if (cj && unlogged(sl).length) { out.notLoggedN++; unlogged(sl).forEach((m) => out.notLogged.add(canonVariant(m))); continue; }
+    if (!cj) { out.noJournal = true; continue; } // journal unreadable: nothing is cleansed
+    out.go.push(sl.slotId);
+  }
+  const tool = game.readStorage().items.find((x) => x?.itemType === 'Tool' && x.toolId === 'CropCleanser' && !('id' in x));
+  out.have = Number(tool?.quantity) || 0;
+  return out;
+}
+(() => {
+  let bar = null, armedAt = 0, busy = false, lastHtml = '', note = '';
+  const pick = new Set(); let pickAll = false, pickOpen = false; // kept while the page is open
+  const hide = () => { if (bar) bar.style.display = 'none'; lastHtml = ''; armedAt = 0; };
+  const names = (list) => list.map((m) => canonVariant(m)).join(' + ');
+  const draw = () => {
+    try {
+      if (settings.featCleanseAll === false || !document.body || gameOverlayOpen()) return hide();
+      const p = busy ? null : cleansePlan(pick, pickAll);
+      // shown with two or more crops on the plant that could be cleansed (just one: the game's own cleanse does that)
+      if (!busy && (!p || p.cleanable < 2)) { note = ''; return hide(); }
+      if (!bar) {
+        bar = document.createElement('div'); bar.id = 'mgpc-cleanse';
+        bar.addEventListener('click', (e) => {
+          const b = e.target.closest?.('button'); if (!b) return;
+          e.stopPropagation();
+          if (b.dataset.go != null) return press();
+          if (busy) return;
+          if (b.dataset.pickt != null) pickOpen = !pickOpen;
+          else if (b.dataset.like != null) pick.clear();
+          else if (b.dataset.any != null) pickAll = false;
+          else if (b.dataset.all != null) pickAll = true;
+          else if (b.dataset.m) { if (pick.has(b.dataset.m)) pick.delete(b.dataset.m); else pick.add(b.dataset.m); }
+          armedAt = 0; note = ''; lastHtml = ''; draw();
+        });
+        for (const ev of ['pointerdown', 'mousedown', 'touchstart']) bar.addEventListener(ev, (e) => e.stopPropagation());
+        document.body.appendChild(bar);
+      }
+      let html;
+      if (busy) html = `<span>🧼 ${esc(busy)}</span>`;
+      else {
+        const n = Math.min(p.go.length, p.have), armed = armedAt && Date.now() - armedAt < 5000;
+        if (!armed) armedAt = 0;
+        const left = [p.preserved ? `${p.preserved} preserved` : '', p.notLoggedN ? `${p.notLoggedN} with ${[...p.notLogged].join(', ')} not in your journal yet` : '', p.noJournal ? 'your journal couldn\'t be read, so none' : '', !p.grown ? 'the plant isn\'t fully grown' : '', p.go.length > p.have ? `${p.go.length - p.have} for lack of Crop Cleansers (you have ${p.have})` : ''].filter(Boolean);
+        const can = n > 0 && p.grown;
+        const what = pick.size ? `with ${pickAll ? 'all' : 'any'} of ${esc([...pick].join(', '))}` : p.kind.length ? `like this one (${esc(names(p.kind))})` : '';
+        const open = pickOpen || pick.size > 0;
+        html = (pick.size || p.kind.length
+          ? `<span>🧼 <b>${p.like}</b> crop${p.like === 1 ? '' : 's'} ${what}</span>`
+          : '<span>🧼 No weather mutation on this crop: ‹ › for another, or Pick</span>')
+          + (can ? `<button data-go class="go${armed ? ' armed' : ''}">${armed ? `Sure? Cleanse ${n} (uses ${n} Crop Cleanser${n === 1 ? '' : 's'})` : `Cleanse ${n === p.like ? 'all ' : ''}${n}`}</button>` : '')
+          + `<button data-pickt class="pk${open ? ' on' : ''}" title="Pick the crops by mutation, as in the garden search's Filters">Pick ${open ? '▴' : '▾'}</button>`
+          + (!open ? '' : `<span class="row"><button data-like class="${pick.size ? '' : 'on'}" title="Crops with exactly the weather mutations of the crop on the game's card (‹ › on the card picks another)">Like the card's crop</button>`
+          + `<span class="or">or crops with</span><button data-any class="${pick.size && !pickAll ? 'on' : ''}" title="A crop with any of the picked mutations">any</button><button data-all class="${pick.size && pickAll ? 'on' : ''}" title="A crop with all of the picked mutations">all</button><span class="or">of:</span>`
+          + p.present.map((m) => `<button data-m="${esc(m)}" class="${pick.has(m) ? 'on' : ''}" title="${esc(m)}">${variantIconHtml(m, 16)}${esc(m)}</button>`).join('') + '</span>')
+          + (left.length ? `<span class="sub">Left out: ${esc(left.join('; '))}.</span>` : '')
+          + (note ? `<span class="sub">${esc(note)}</span>` : '');
+      }
+      if (html !== lastHtml) { bar.innerHTML = html; lastHtml = html; }
+      bar.style.display = 'flex';
+      // with the game's plant card: just above it (above the plant hint when that shows); else under your character
+      const a = plantCardAnchor;
+      if (a && Date.now() - a.at < 1000 && Number.isFinite(a.cx) && Number.isFinite(a.y)) {
+        bar.classList.add('oncard');
+        const half = (bar.offsetWidth || 0) / 2, x = Math.round(Math.min(Math.max(a.cx, half + 8), innerWidth - half - 8)), y = Math.round(Math.max(a.y, (bar.offsetHeight || 0) + 8));
+        if (bar.style.left !== x + 'px') bar.style.left = x + 'px';
+        if (bar.style.top !== y + 'px') bar.style.top = y + 'px';
+      } else {
+        bar.classList.remove('oncard');
+        const mh = document.getElementById('mgpc-mounthint');
+        placeUnderPlayer(bar, playerPos(), mh && mh.style.display === 'flex' ? mh.offsetHeight + 6 : 0);
+      }
+    } catch { hide(); }
+  };
+  async function press() {
+    if (busy) return;
+    if (!armedAt || Date.now() - armedAt >= 5000) { armedAt = Date.now(); note = ''; lastHtml = ''; draw(); return; }
+    armedAt = 0;
+    const p = cleansePlan(pick, pickAll); if (!p || !p.grown) { draw(); return; }
+    const ready = net.readiness(); if (!ready.ok) { note = `Not now: ${ready.reason}`; draw(); return; }
+    // what was shown is what's cleansed: the crops picked now, matched the same way before each one
+    const want = p.go.slice(0, p.have), tileIdx = p.tileIdx, match = cleanseMatcher(new Set(pick), pickAll, p.kind);
+    let done = 0, why = '';
+    try {
+      for (const slotId of want) {
+        busy = `Cleansing ${done + 1} of ${want.length}…`; lastHtml = ''; draw();
+        // checked again before each: still holding it, still on that plant, that crop still a match, not preserved
+        const here = jotai.live(/^myOwnCurrentDirtTileIndexAtom$/);
+        if (jotai.live(/^mySelectedItemIdAtom$/) !== 'CropCleanser' || (Number.isInteger(here) && here !== tileIdx)) { why = 'you moved or put the Crop Cleanser away'; break; }
+        const sl = game.riding()?.garden?.tileObjects?.[tileIdx]?.slots?.find((x) => x?.slotId === slotId);
+        if (!sl || sl.preserved || !match(sl)) continue;
+        const before = weatherOf(sl.mutations);
+        const r = await net.send({ type: 'CropCleanser', tileObjectIdx: tileIdx, growSlotIdx: slotId });
+        if (!r.ok) { why = `the game said "${r.reason || r.code}"`; break; }
+        done++;
+        await game.waitFor(() => !sameSet(weatherOf(game.riding()?.garden?.tileObjects?.[tileIdx]?.slots?.find((x) => x?.slotId === slotId)?.mutations), before), 1500);
+      }
+    } catch (e) { why = String(e?.message || e); }
+    busy = false;
+    note = `Cleansed ${done} of ${want.length}${why ? `; stopped: ${why}` : ''}.`;
+    LOG(`🧼 ${note}`);
+    lastHtml = ''; draw();
+    if (!bar || bar.style.display === 'none') toast(`🧼 ${esc(note)}`);
+  }
+  setInterval(draw, 400);
+  if (TEST_BUILD) W.__mglhCleanse = { plan: () => { const p = cleansePlan(pick, pickAll); return p && { ...p, notLogged: [...p.notLogged] }; } };
+})();
+// ---------- 🔍 Garden search: fade every tile of your garden that doesn't match ----------
+// A lighter take on QPM's garden filter. Type crop / mutation / egg / decor words (all must match, "-word" excludes),
+// or press 📖 for plants whose crop still has journal entries missing. Read-only: it only changes how see-through the
+// game's drawings of your tiles are (the tile pictures, not the tiles themselves), and puts them back when closed.
+// Tiles are the game's Pixi nodes labelled "Tile (x, y)" (as QPM finds them); x, y → the world map → your dirt or
+// boardwalk tile → what's on it (room state). The game redraws now and then, so the fading is re-applied while open.
+const GS_DIM = 0.12;
+const gardenSearch = (() => {
+  let bar = null, input = null, jbtn = null, count = null;
+  let open = false, query = '', journal = false, tiles = [], lastScan = 0;
+  // the toggles (Filters): kinds of things to show, crop variants (any or all of them on one crop)
+  let kinds = new Set(), muts = new Set(), mutAll = false, fpanel = null, fbtn = null, gsSync = () => {};
+  // 🎯 best spot to ride (Filters): which pressable ability, the marked 3×3 and the line under the chips
+  let spot = null, bsi = null, markAt = null;
+  const dimmed = new Map(); // child node → its alpha before we faded it
+  const TILE_RE = /^Tile \((\d+), (\d+)\)$/;
+  const scan = () => {
+    const stage = pixiStage(); if (!stage) return [];
+    const out = [], stack = [stage]; let n = 0;
+    while (stack.length && n++ < 250000) {
+      const x = stack.pop(); if (!x) continue;
+      const m = typeof x.label === 'string' ? TILE_RE.exec(x.label) : null;
+      if (m) { out.push({ node: x, x: +m[1], y: +m[2] }); continue; }
+      if (Array.isArray(x.children)) for (const c of x.children) stack.push(c);
+    }
+    return out;
+  };
+  // only what still has our fading (another mod may have set its own since)
+  const restoreAll = () => {
+    for (const [c, a] of dimmed) { try { if (!c.destroyed && c.alpha === GS_DIM) c.alpha = a; } catch {} }
+    dimmed.clear();
+  };
+  // Garden Companion's plant focus fades plants too, re-applying its own see-through level on every redraw: with both on
+  // the plants would flicker between the two, so this search waits while that's on
+  const gcFocusOn = () => { try { return JSON.parse(W.localStorage.getItem('gardenCompanion.overviewFocus.v1') || '{}')?.enabled === true; } catch { return false; } };
+  const fade = (node, on) => {
+    for (const c of node.children ?? []) {
+      if (on) { if (!dimmed.has(c)) dimmed.set(c, c.alpha ?? 1); if (c.alpha !== GS_DIM) c.alpha = GS_DIM; }
+      else if (dimmed.has(c)) { if (c.alpha === GS_DIM) c.alpha = dimmed.get(c); dimmed.delete(c); }
+    }
+  };
+  // Words a tile answers to: its species / crop / egg / decor names and its crops' mutations (both the game's ids and
+  // the journal's names, e.g. Ambershine = Amberlit), plus "max weight" for full-size crops
+  const wordsOf = (t, maxScaleOf) => {
+    const w = [];
+    const add = (v) => { if (v) w.push(String(v).toLowerCase()); };
+    if (!t?.objectType) return '';
+    add(t.objectType);
+    for (const id of [t.species, t.eggId, t.decorId]) { add(id); if (id) add(pretty(id)); }
+    if (t.objectType === 'plant') {
+      const plants = unwrapLive(liveData?.plants) ?? {};
+      for (const sl of t.slots ?? []) {
+        if (!sl?.species) continue;
+        add(sl.species); add(pretty(sl.species)); add(plants[sl.species]?.crop?.name); add(plants[sl.species]?.plant?.name);
+        for (const m of slotMuts(t, sl)) { add(m); add(canonVariant(m)); }
+        const ms = maxScaleOf(sl.species); if (ms && Number(sl.targetScale ?? 0) >= ms - 1e-6) add('max weight');
+      }
+    }
+    return w.join(' | ');
+  };
+  const slotMuts = (t, sl) => (Array.isArray(sl.mutations) && sl.mutations.length ? sl.mutations : (Array.isArray(t.mutations) ? t.mutations : [])).filter((x) => typeof x === 'string');
+  // 📖: plants whose crop still has journal entries missing (any variant not logged yet), whatever mutations are on it
+  // right now: the plants to keep an eye on for the mutations the journal still needs. seen collects those crops.
+  // The crops are the plant's slots: a patch (Daisy Patch, Cattail Patch) can grow another crop than its own species
+  // (Purple Daisy, Variegated Cattail), and it's that crop's journal that counts. The plant's own species only when it
+  // has no crops on it.
+  const needsEntries = (t, bySp, seen) => {
+    if (t?.objectType !== 'plant') return false;
+    let need = false;
+    const crops = (t.slots ?? []).map((sl) => sl?.species).filter(Boolean);
+    for (const sp of new Set(crops.length ? crops : [t.species].filter(Boolean))) {
+      const c = bySp.get(sp);
+      if (c && CROP_VARIANTS.some((v) => !c.logged.has(v))) { need = true; seen.add(sp); }
+    }
+    return need;
+  };
+  const tokens = () => query.toLowerCase().split(/\s+/).filter(Boolean).map((t) => (/^[-!]./.test(t) ? { not: true, w: t.slice(1) } : { not: false, w: t }));
+  const apply = () => {
+    if (!open) return;
+    if (spot && settings.featBestSpot === false) { spot = null; gsSync(); }
+    if (!query.trim() && !journal && !kinds.size && !muts.size && !spot) { restoreAll(); hideMark(); setCount(''); return; }
+    const gcOn = gcFocusOn();
+    if (gcOn && !spot) { restoreAll(); hideMark(); setCount('paused: Garden Companion\'s plant focus is on'); return; }
+    if (!tiles.length || Date.now() - lastScan > 3000 || tiles.some((t) => t.node.destroyed)) { tiles = scan(); lastScan = Date.now(); }
+    const r = game.riding(settings.gardenOwner);
+    const map = jotai.read(MAP_ATOM_RE);
+    if (!r?.garden || !map?.cols) { setCount('garden not found'); hideMark(); return; }
+    if (spot) return applySpot(r, map, gcOn);
+    hideMark();
+    const st = cropJournalState() ?? [];
+    const bySp = new Map(st.map((c) => [c.sp, c]));
+    const maxScaleOf = (sp) => bySp.get(sp)?.maxScale ?? (Number(unwrapLive(liveData?.plants)?.[sp]?.crop?.maxSizeMultiplier) || null);
+    const toks = tokens();
+    if (journal && !st.length) { setCount('journal not read'); return; }
+    let hits = 0; const seen = new Set();
+    for (const { node, x, y } of tiles) {
+      if (node.destroyed) continue;
+      const g = x + y * map.cols;
+      const d = map.globalTileIdxToDirtTile?.[g], b = map.globalTileIdxToBoardwalk?.[g];
+      let t, mine = false;
+      if (d?.dirtTileIdx != null && d.userSlotIdx === r.slotIdx) { mine = true; t = r.garden.tileObjects?.[d.dirtTileIdx]; }
+      else if (b?.boardwalkTileIdx != null && b.userSlotIdx === r.slotIdx) { mine = true; t = r.garden.boardwalkTileObjects?.[b.boardwalkTileIdx]; }
+      if (!mine) continue; // other gardens and the paths between are left alone
+      if (!t?.objectType) { fade(node, false); continue; } // bare ground stays as it is
+      let ok = true;
+      if (ok && toks.length) { const w = wordsOf(t, maxScaleOf); ok = toks.every((k) => w.includes(k.w) !== k.not); }
+      if (ok && kinds.size) ok = kinds.has(t.objectType);
+      if (ok && muts.size) ok = t.objectType === 'plant' && (t.slots ?? []).some((sl) => {
+        if (!sl?.species) return false;
+        // per crop: its mutations (Normal if none) and Max Weight, as the journal counts them
+        const vs = new Set(cropVariantsOf({ mutations: slotMuts(t, sl), scale: sl.targetScale }, maxScaleOf(sl.species)));
+        return mutAll ? [...muts].every((m) => vs.has(m)) : [...muts].some((m) => vs.has(m));
+      });
+      if (ok && journal) ok = needsEntries(t, bySp, seen);
+      if (ok) hits++;
+      fade(node, !ok);
+    }
+    setCount(journal ? `${hits} plant${hits === 1 ? '' : 's'} · ${seen.size} crop${seen.size === 1 ? '' : 's'} to journal` : `${hits} match${hits === 1 ? '' : 'es'}`);
+  };
+  const setCount = (txt) => { if (count && count.textContent !== txt) count.textContent = txt; };
+  const setInfo = (txt) => { if (bsi && bsi.textContent !== txt) bsi.textContent = txt; };
+  // 🎯 Best spot: the tile to stand on (riding the pet) where pressing the ability gets the most, with the 3×3 it
+  // covers. Everything of yours outside the 3×3 is faded; a box is drawn over the 3×3 and its middle tile.
+  const applySpot = (r, map, gcOn) => {
+    const sp = rideSpots(spot, r, map); if (!sp) { setCount('garden not found'); hideMark(); return; }
+    const def = sp.def, pos = playerPos(), b = sp.best(pos);
+    const here = pos ? sp.at(Math.round(pos.x), Math.round(pos.y)) : null;
+    const pets = ridePetStatus(spot, r);
+    const keptTxt = sp.kept ? ` Left out: spots that would take Amber off a tile of only rare crops (Purple Daisy, Four-Leaf Clover, …): ${sp.kept} such tile${sp.kept === 1 ? '' : 's'} with Amber.` : '';
+    if (!b) {
+      restoreAll(); hideMark(); setCount(sp.kept ? '🎯 nothing (rare crops kept)' : `🎯 nothing for ${def.name}`);
+      setInfo(sp.kept ? `Every spot with Amber would also take it off a tile of only rare crops, so none is picked.${keptTxt} ${pets}` : `Nothing on your garden for ${def.name} right now (${def.kinds.map(([, nm]) => nm).join(' or ')} crops that aren't preserved). ${pets}`);
+      return;
+    }
+    if (gcOn) restoreAll();
+    else {
+      for (const { node, x, y } of tiles) {
+        if (node.destroyed) continue;
+        const g = x + y * map.cols;
+        const d = map.globalTileIdxToDirtTile?.[g], w = map.globalTileIdxToBoardwalk?.[g];
+        let t;
+        if (d?.dirtTileIdx != null && d.userSlotIdx === r.slotIdx) t = r.garden.tileObjects?.[d.dirtTileIdx];
+        else if (w?.boardwalkTileIdx != null && w.userSlotIdx === r.slotIdx) t = r.garden.boardwalkTileObjects?.[w.boardwalkTileIdx];
+        else continue; // other gardens and the paths between are left alone
+        fade(node, !!t?.objectType && !(Math.abs(x - b.x) <= 1 && Math.abs(y - b.y) <= 1));
+      }
+    }
+    markAt = { x: b.x, y: b.y, n: b.n };
+    spotMarks.set('search', [{ ab: spot, ...markAt }]);
+    setCount(`🎯 ${def.unit(b.n)}`);
+    const brk = rideBreakdown(def, b.by);
+    const hereTxt = !pos ? '' : !here ? ' You\'re not on your garden.' : here.keep.length ? ` Where you stand: ${here.n}, but it ${KEEP_NOTE(here.keep)}.` : here.x === b.x && here.y === b.y ? ' You\'re on it.' : here.n === b.n ? ' Where you stand gives as much.' : ` Where you stand: ${here.n}.`;
+    setInfo(`Stand on the 🎯 tile, riding the pet: ${def.unit(b.n)}${brk ? ` (${brk})` : ''}.${b.ties > 1 ? ` ${b.ties} spots give that much; the nearest is marked.` : ''}${hereTxt}${keptTxt} ${pets}`);
+  };
+  const hideMark = () => { markAt = null; spotMarks.set('search', []); };
+  const place = () => {
+    const f = document.getElementById('mgpc-gardenfab'); if (!bar || !f) return;
+    const rc = f.getBoundingClientRect();
+    bar.style.left = Math.round(Math.min(rc.right + 8, innerWidth - bar.offsetWidth - 8)) + 'px';
+    bar.style.bottom = Math.round(innerHeight - rc.bottom) + 'px';
+  };
+  const build = () => {
+    bar = document.createElement('div'); bar.id = 'mgpc-gsearch';
+    bar.innerHTML = '<input type="text" placeholder="crop, mutation… (-word excludes)" spellcheck="false" autocomplete="off"><button data-f title="Toggles: what to show, and mutations">Filters</button><button data-j title="Only plants whose crop still has journal entries missing (the mutations the journal still needs for it)">📖 Journal</button><span class="n"></span><button data-x title="Close (Esc) — puts everything back">✕</button>';
+    fpanel = document.createElement('div'); fpanel.className = 'gsf';
+    const chipName = { Normal: 'No mutation', 'Max Weight': 'Max weight' };
+    fpanel.innerHTML = `<div class="row"><span class="lb">Show</span>${[['plant', '🌱 Plants'], ['egg', '🥚 Eggs'], ['decor', '🪑 Decor']].map(([k, l]) => `<button data-k="${k}">${l}</button>`).join('')}</div>`
+      + `<div class="row"><span class="lb">Crops with</span><button data-any class="on" title="A crop with any of the picked mutations">any</button><button data-all title="A crop with all of the picked mutations">all</button><span style="opacity:.75;font-weight:500">of:</span></div>`
+      + `<div class="row">${['Gold', 'Rainbow', 'Wet', 'Chilled', 'Frozen', 'Thunderstruck', 'Thundercharged', 'Dawnlit', 'Amberlit', 'Dawnbound', 'Amberbound', 'Max Weight', 'Normal'].map((v) => `<button data-m="${esc(v)}" title="${esc(v)}">${variantIconHtml(v, 16)}${esc(chipName[v] ?? v)}</button>`).join('')}</div>`
+      + `<div class="row bsr"><span class="lb" title="Where to stand, riding the pet, so pressing its ability gets the most">🎯 Best spot</span>${Object.entries(RIDE_ABILITIES).map(([k, d]) => `<button data-s="${k}" title="${esc(d.name)}: the tile where it gets the most (the 3×3 around it)">${d.icon} ${esc(d.name.replace(/ Capture$|charger$/, ''))}</button>`).join('')}</div>`
+      + '<div class="bsi"></div>'
+      + '<div class="row"><button data-clear>Clear toggles</button></div>';
+    bar.appendChild(fpanel);
+    document.body.appendChild(bar);
+    input = bar.querySelector('input'); jbtn = bar.querySelector('[data-j]'); count = bar.querySelector('.n'); fbtn = bar.querySelector('[data-f]'); bsi = fpanel.querySelector('.bsi');
+    const syncChips = () => {
+      fpanel.querySelectorAll('[data-k]').forEach((b) => b.classList.toggle('on', kinds.has(b.dataset.k)));
+      fpanel.querySelectorAll('[data-m]').forEach((b) => b.classList.toggle('on', muts.has(b.dataset.m)));
+      fpanel.querySelectorAll('[data-s]').forEach((b) => b.classList.toggle('on', spot === b.dataset.s));
+      fpanel.querySelector('[data-any]').classList.toggle('on', !mutAll); fpanel.querySelector('[data-all]').classList.toggle('on', mutAll);
+      const bsOn = settings.featBestSpot !== false, bsr = fpanel.querySelector('.bsr');
+      if (bsr.style.display !== (bsOn ? '' : 'none')) bsr.style.display = bsOn ? '' : 'none';
+      if (bsi.style.display !== (spot ? '' : 'none')) bsi.style.display = spot ? '' : 'none';
+      if (!spot) setInfo('');
+      const n = kinds.size + muts.size;
+      const label = spot ? 'Filters (🎯)' : n ? `Filters (${n})` : 'Filters';
+      if (fbtn.textContent !== label) fbtn.textContent = label;
+      fbtn.classList.toggle('on', n > 0 || !!spot || fpanel.classList.contains('open'));
+    };
+    gsSync = syncChips;
+    fbtn.onclick = () => { fpanel.classList.toggle('open'); fbtn.blur(); syncChips(); };
+    fpanel.addEventListener('click', (e) => {
+      const b = e.target.closest?.('button'); if (!b) return;
+      // 🎯 is a view of its own: picking it sets the other toggles aside (they're kept), any other toggle ends it
+      if (b.dataset.s) { spot = spot === b.dataset.s ? null : b.dataset.s; b.blur(); syncChips(); apply(); return; }
+      spot = null;
+      if (b.dataset.k) { if (kinds.has(b.dataset.k)) kinds.delete(b.dataset.k); else kinds.add(b.dataset.k); }
+      else if (b.dataset.m) { if (muts.has(b.dataset.m)) muts.delete(b.dataset.m); else muts.add(b.dataset.m); }
+      else if ('any' in b.dataset) mutAll = false;
+      else if ('all' in b.dataset) mutAll = true;
+      else if ('clear' in b.dataset) { kinds.clear(); muts.clear(); mutAll = false; }
+      b.blur(); syncChips(); apply();
+    });
+    // typing here must not walk your character around
+    ['keydown', 'keyup', 'keypress'].forEach((k) => input.addEventListener(k, (e) => { e.stopPropagation(); if (k === 'keydown' && e.key === 'Escape') { input.blur(); close(); } }));
+    input.addEventListener('input', () => { query = input.value; if (spot) { spot = null; syncChips(); } apply(); });
+    jbtn.onclick = () => { journal = !journal; jbtn.classList.toggle('on', journal); jbtn.blur(); if (spot) { spot = null; syncChips(); } apply(); };
+    bar.querySelector('[data-x]').onclick = () => close();
+  };
+  const show = () => {
+    if (settings.featGardenSearch === false) return;
+    if (!bar) build();
+    open = true; bar.classList.add('open'); document.getElementById('mgpc-gardenfab')?.classList.add('on');
+    place(); input.value = query; input.focus(); gsSync(); apply();
+  };
+  const close = () => {
+    open = false; restoreAll(); hideMark(); tiles = [];
+    bar?.classList.remove('open'); document.getElementById('mgpc-gardenfab')?.classList.remove('on');
+  };
+  setInterval(() => {
+    try {
+      const f = document.getElementById('mgpc-gardenfab');
+      if (f) f.style.display = settings.featGardenSearch === false ? 'none' : '';
+      if (open && settings.featGardenSearch === false) close();
+      if (open) { place(); gsSync(); apply(); }
+    } catch {}
+  }, 700);
+  // test hook (test builds only)
+  if (TEST_BUILD) W.__mglhGardenSearch = { show, close, set: (q, j) => { query = q ?? ''; journal = !!j; if (input) input.value = query; jbtn?.classList.toggle('on', journal); apply(); }, count: () => count?.textContent ?? '', toggles: () => ({ kinds: [...kinds], muts: [...muts], all: mutAll, spot }), spot: (k) => { spot = k ?? null; gsSync(); apply(); }, info: () => bsi?.textContent ?? '', mark: () => (markAt ? { ...markAt } : null) };
+  return { toggle: () => (open ? close() : show()), close };
+})();
 // Runs only when switched on and no other mod is doing it (checked again every few seconds: mods load in any order)
-const applyKeepAwake = () => { if (settings.keepAwake !== false && !keepAwake.othersHandleIt()) keepAwake.start(); else keepAwake.stop(); };
+const applyKeepAwake = () => {
+  const others = keepAwake.othersHandleIt();
+  if (settings.keepAwake !== false && !others) keepAwake.start(); else keepAwake.stop();
+  keepAwake.pingOnly(settings.keepAwake !== false && others);
+};
 applyKeepAwake();
 setInterval(applyKeepAwake, 3000);
+// ---------- ⬆ Update check: is a newer version on the mod's GitHub page? ----------
+// Reads the public file Tampermonkey updates from (just its first 2 KB, where the version line is) a few seconds after
+// the page loads and every 6 hours, and the changelog when there's a newer version. Read-only: nothing about you or
+// the game is sent. A newer version shows a red dot on 🐾 and a "⬆ vX.Y.Z" link in the panel's title bar, which opens
+// the file so Tampermonkey offers to update. Nothing is installed by the mod. Settings → Features switches it off.
+const UPDATE_BASE = 'https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/';
+const UPDATE_FILE = REMOTE_POOLS ? 'MG-Lategame-Helper.user.js' : 'MG-Lategame-Helper-no-pools.user.js';
+let updateInfo = null; // { version, notes } when GitHub has a newer version
+// Versions: "0.24.0", or a test build "0.24.0-test14", which comes before 0.24.0 itself (as Tampermonkey orders them:
+// "1.10.0-alpha" < "1.10"); test builds of the same version go by their number.
+const verCmp = (a, b) => {
+  const parts = (v) => { const [main, pre = null] = String(v).split(/-(.*)/s); return { n: main.split('.').map((x) => Number(x) || 0), pre }; };
+  const x = parts(a), y = parts(b);
+  for (let i = 0; i < Math.max(x.n.length, y.n.length); i++) { const d = (x.n[i] || 0) - (y.n[i] || 0); if (d) return d; }
+  if (x.pre === y.pre) return 0;
+  if (x.pre === null) return 1;
+  if (y.pre === null) return -1;
+  const nx = Number(/\d+/.exec(x.pre)?.[0] ?? 0), ny = Number(/\d+/.exec(y.pre)?.[0] ?? 0);
+  return nx - ny || (x.pre < y.pre ? -1 : 1);
+};
+async function checkForUpdate(manual = false) {
+  if (settings.featUpdateCheck === false && !manual) { updateInfo = null; showUpdateBadge(); return { off: true }; }
+  const get = typeof W.fetch === 'function' ? W.fetch.bind(W) : fetch;
+  let head = '', error = '';
+  try { const r = await get(UPDATE_BASE + UPDATE_FILE, { cache: 'no-store', headers: { Range: 'bytes=0-2047' } }); if (r.ok) head = await r.text(); else error = `HTTP ${r.status}`; } catch (e) { error = String(e?.message || e); }
+  if (!head) { try { const r = await get(UPDATE_BASE + UPDATE_FILE, { cache: 'no-store' }); if (r.ok) { head = (await r.text()).slice(0, 4096); error = ''; } else error = `HTTP ${r.status}`; } catch (e) { error = error || String(e?.message || e); } }
+  const latest = /@version\s+(\d+(?:\.\d+)*(?:-[\w.]+)?)/.exec(head)?.[1];
+  if (!latest) return { error: error || 'no version line in it' };
+  const newer = verCmp(latest, MOD_VERSION) > 0;
+  if (newer && updateInfo?.version !== latest) {
+    let notes = '';
+    try {
+      const r = await get(UPDATE_BASE + 'CHANGELOG.md', { cache: 'no-store' });
+      if (r.ok) {
+        // the changelog's sections for the versions newer than this one
+        const parts = (await r.text()).split(/^## /m).slice(1).filter((x) => { const v = /^(\d+(?:\.\d+)*)/.exec(x)?.[1]; return v && verCmp(v, MOD_VERSION) > 0; });
+        notes = parts.map((x) => 'v' + x.trim()).join('\n\n').slice(0, 1500);
+      }
+    } catch {}
+    updateInfo = { version: latest, notes };
+  } else if (!newer) updateInfo = null;
+  showUpdateBadge();
+  return { latest, newer };
+}
+function showUpdateBadge() {
+  const fab = document.getElementById('mgpc-fab');
+  const on = !!updateInfo && settings.featUpdateCheck !== false;
+  if (fab) {
+    fab.classList.toggle('upd', on);
+    const base = fab.title.replace(/ · ⬆ v[\d.]+ available.*$/, '');
+    fab.title = on ? `${base} · ⬆ v${updateInfo.version} available (link in the panel's title bar)` : base;
+  }
+  const hd = document.querySelector(`#${ID} .hd b`);
+  let link = document.querySelector(`#${ID} .hd .updlink`);
+  if (!on) { link?.remove(); return; }
+  if (!hd) return;
+  if (!link) { link = document.createElement('a'); link.className = 'updlink'; link.target = '_blank'; link.rel = 'noopener'; hd.appendChild(link); }
+  link.href = UPDATE_BASE + UPDATE_FILE;
+  link.textContent = `⬆ v${updateInfo.version}`;
+  link.title = `Version ${updateInfo.version} is on GitHub (you have ${MOD_VERSION}). Click: Tampermonkey opens it and offers to update.` + (updateInfo.notes ? `\n\nWhat's new:\n\n${updateInfo.notes}` : '');
+}
+setTimeout(() => { checkForUpdate().catch(() => {}); }, 8000);
+setInterval(() => { checkForUpdate().catch(() => {}); }, 6 * 3600 * 1000);
+setInterval(() => { try { if (updateInfo) showUpdateBadge(); } catch {} }, 5000); // the panel may be built after the check
 const whenRoom = () => (document.body && W.MagicCircle_RoomConnection ? mount() : setTimeout(whenRoom, 500));
 whenRoom();
 LOG(`v${MOD_VERSION} ready — press Alt+P or click 🐾 (bottom-left).`);
@@ -4922,11 +6228,15 @@ function remoteStatusText() {
 // What the phone sees: whether the game is connected, what's to buy (names, amounts, pictures) and when the next restock
 // is. Nothing else from the game or the PC. People with the Buy-only link see the same (only while sharing is on).
 function remoteStatus() {
+  net.verify(); // a phone is linked: a just-reconnected game connection gets checked, so a press from the phone can buy
   const ready = net.readiness();
   let c = null; try { c = collectShopBuy(); } catch {}
   // [name, amount, picture]; pictures from the sprite server are sent without its address (the page adds it back)
   const SPR = 'https://mg-api.ariedam.fr/assets/sprites/';
-  const items = (c?.items ?? []).slice(0, 36).map((i) => { const u = shopImgUrl(i); return [String(pretty(i.name)).slice(0, 28), i.left, u.startsWith(SPR) ? u.slice(SPR.length, SPR.length + 60) : '']; });
+  // The game data's picture addresses end in a version tag ("…/Carrot.png?v=1847"), which the phone page doesn't take
+  // (it only shows plain "folder/name.png" paths), so the tag is dropped; a path too long to send whole is left out
+  const pic = (u) => { const path = u.startsWith(SPR) ? u.slice(SPR.length).split(/[?#]/)[0] : ''; return path.length <= 80 ? path : ''; };
+  const items = (c?.items ?? []).slice(0, 36).map((i) => [String(pretty(i.name)).slice(0, 28), i.left, pic(shopImgUrl(i))]);
   const hb = { t: 'hb', v: MOD_VERSION, pc: remotePcId(), name: String(settings.remoteName || '').slice(0, 24), ok: !!ready.ok, why: ready.ok ? '' : String(ready.reason || 'not connected').slice(0, 120),
     units: c?.units ?? 0, items, next: Number.isFinite(c?.next) ? Math.round(c.next) : null, busy: shopBusy || remoteBuying, share: remoteSharing(), at: Date.now() };
   // keep the status small (well under the brokers' limits): pictures go first, then the end of the list
@@ -4959,6 +6269,15 @@ async function remoteHeartbeat() {
 }
 // the last buy's result: owner key only
 const remoteLast = () => { if (lastBuyResult) remoteSession?.send({ t: 'last', res: { at: lastBuyResult.at, text: lastBuyResult.text.slice(0, 900) } }, { retain: true, via: 'o' }); };
+// A connection the game just opened, not yet seen to pass through the mod: check it now (resend where you stand, see it
+// pass) and wait up to 2 s for that. true once the connection is ready.
+async function netCheckNow() {
+  let r = net.readiness(); if (r.ok) return true;
+  if (!r.unseen) return false;
+  net.verify();
+  for (let i = 0; i < 10; i++) { await sleep(200); r = net.readiness(); if (r.ok) return true; if (!r.unseen) return false; }
+  return false;
+}
 async function remoteOnMessage(m, { via, part = '/m', app = false } = {}) {
   if (!settings.featRemote || !m || part !== '/m' || !REMOTE_CMDS[via]?.has(m.t)) return; // only these commands, nothing else
   if (typeof m.mid !== 'string' || remoteSeen.has(m.mid)) return;
@@ -4975,6 +6294,8 @@ async function remoteOnMessage(m, { via, part = '/m', app = false } = {}) {
   if (m.t === 'stop') { rareStop(); reply('Repeating alerts stopped until the next restock.'); return; }
   if (m.t === 'reconnect') {
     if (net.readiness().ok) { reply('The PC is already connected.', false); return; }
+    // just reconnected by the game: checked in place, no reload needed
+    if (await netCheckNow()) { reply('The PC is connected (the game had reconnected; checked).'); remoteHeartbeat(); return; }
     reply('Reconnecting the PC…');
     setTimeout(() => location.reload(), 800);
     return;
@@ -4991,6 +6312,7 @@ async function remoteOnMessage(m, { via, part = '/m', app = false } = {}) {
     }
     // right after a buy the game's stock takes a moment to update: a press then gets that buy's result
     if (remoteLastDone && now - remoteLastDone.at < 4000) { reply(`Already bought a moment ago: ${remoteLastDone.text}`); return; }
+    await netCheckNow(); // the game just reconnected: check the new connection first (a second or two)
     const ready = net.readiness();
     if (!ready.ok) { reply(`The PC can't buy right now: ${ready.reason || 'not connected'}.`, false); return; }
     const c = collectShopBuy();

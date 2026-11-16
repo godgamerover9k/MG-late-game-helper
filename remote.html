@@ -7,62 +7,123 @@
 <meta name="referrer" content="no-referrer">
 <title>MG Buy</title>
 <style>
-  :root { --bg:#f4f2ee; --card:#ffffff; --line:#dedad3; --text:#1d1f23; --muted:#6b6e75; --btn:#ecebe7; --go:#2e7d32; --goText:#fff; --ok:#2e7d32; --bad:#c62828; --chip:#efece6; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#16181c; --card:#1f2228; --line:#33373f; --text:#e8e6e1; --muted:#9a9da5; --btn:#343842; --go:#2e7d32; --goText:#fff; --ok:#7bd88f; --bad:#ff8a80; --chip:#2a2e35; } }
+  :root { --bg:#f4f2ee; --card:#ffffff; --line:#dedad3; --text:#1d1f23; --muted:#6b6e75; --btn:#ecebe7; --go:#2e7d32; --goText:#fff; --ok:#2e7d32; --bad:#c62828; --chip:#efece6; --ready:#c0392b; --busy:#b26a00; --idle:#a3a39e; --rmline:#e4b9b5; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16181c; --card:#1f2228; --line:#33373f; --text:#e8e6e1; --muted:#9a9da5; --btn:#343842; --go:#2e7d32; --goText:#fff; --ok:#7bd88f; --bad:#ff8a80; --chip:#2a2e35; --ready:#c0392b; --busy:#f0b35a; --idle:#6b6e75; --rmline:#6b3b38; } }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,-apple-system,sans-serif; }
-  main { max-width:520px; margin:0 auto; padding:16px 16px calc(24px + env(safe-area-inset-bottom)); }
-  h1 { font-size:20px; margin:6px 0 14px; display:flex; align-items:baseline; gap:8px; }
-  h1 small { font-size:12px; color:var(--muted); font-weight:500; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
-  .state { font-size:15px; }
-  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.35 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; }
+  main { max-width:520px; margin:0 auto; padding:0 16px calc(16px + env(safe-area-inset-bottom)); }
   .muted { color:var(--muted); font-size:13px; }
-  .items { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 2px; }
-  .items span { background:var(--chip); border-radius:999px; padding:3px 10px; font-size:13px; display:inline-flex; align-items:center; gap:5px; }
-  .items img { width:20px; height:20px; object-fit:contain; margin-left:-4px; }
-  label.opt { display:flex; align-items:center; gap:8px; font-size:14px; color:var(--muted); margin-top:8px; }
-  button { font:inherit; font-weight:650; width:100%; min-height:52px; border-radius:12px; border:1px solid var(--line); background:var(--btn); color:var(--text); margin-top:10px; }
-  button.go { background:var(--go); border-color:transparent; color:var(--goText); font-size:18px; min-height:60px; }
-  button.go.ready { background:#c0392b; animation:pulse 2s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(231,76,60,.55); } 50% { box-shadow:0 0 0 8px rgba(231,76,60,0); } }
-  @media (prefers-reduced-motion: reduce) { button.go.ready { animation:none; } }
-  button:disabled { opacity:.45; }
-  .res { margin-top:10px; font-size:14px; white-space:pre-wrap; }
-  .row { display:flex; gap:8px; } .row input { flex:1; } .row button { width:auto; min-height:44px; margin:0; padding:0 16px; }
-  input { font:inherit; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); min-width:0; }
-  details summary { cursor:pointer; color:var(--muted); font-size:14px; }
-  textarea { font:inherit; font-size:14px; width:100%; min-height:70px; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
-  .head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
-  .head b { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tag { font-size:12px; color:var(--muted); background:var(--chip); border-radius:999px; padding:1px 8px; }
-  .head button.x { width:auto; min-height:32px; margin:0; padding:0 10px; font-weight:500; color:var(--muted); background:transparent; }
-  .two { display:flex; gap:8px; } .two button { flex:1; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .icon { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+  button { font:inherit; font-weight:650; min-height:44px; padding:0 14px; border-radius:10px; border:1px solid var(--line); background:var(--btn); color:var(--text); cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.go { background:var(--go); border-color:transparent; color:var(--goText); }
+  button.ready { background:var(--ready); border-color:transparent; color:#fff; animation:pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(231,76,60,.55); } 50% { box-shadow:0 0 0 6px rgba(231,76,60,0); } }
+  @media (prefers-reduced-motion: reduce) { button.ready { animation:none; box-shadow:0 0 0 3px rgba(192,57,43,.25); } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; }
+  /* top: title, next restock, Buy on all; stays in view while the list scrolls */
+  .top { position:sticky; top:0; z-index:2; background:var(--bg); padding:calc(12px + env(safe-area-inset-top)) 0 10px; display:flex; flex-direction:column; gap:10px; }
+  .bar { display:flex; align-items:center; gap:8px; min-height:32px; }
+  h1 { font-size:20px; margin:0; white-space:nowrap; }
+  .bar small { flex:1; min-width:0; font-size:12px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pill { display:inline-flex; align-items:center; gap:5px; background:var(--chip); border-radius:999px; padding:4px 10px; font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .pill .icon { width:14px; height:14px; }
+  .allbar { display:flex; align-items:center; gap:12px; padding:8px 8px 8px 14px; }
+  .allbar > div { flex:1; min-width:0; }
+  .allbar b { display:block; font-weight:650; }
+  #buyall { display:inline-flex; align-items:center; gap:8px; min-height:48px; padding:0 18px; border-radius:12px; font-size:16px; }
+  #buyall .icon { width:18px; height:18px; }
+  #relaynote:empty, #allres:empty, #note:empty { display:none; }
+  #note { margin:2px 0 8px; }
+  /* one section per kind of PC, one row per PC */
+  .sec { margin-bottom:12px; }
+  .sechd { display:flex; align-items:center; min-height:36px; padding:0 2px 0 4px; }
+  .sechd span { flex:1; font-size:13px; font-weight:650; color:var(--muted); }
+  .sechd button { margin:-4px 0; padding:0 12px; border:0; background:transparent; color:var(--ok); font-size:14px; }
+  .list { display:flex; flex-direction:column; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  .pc { background:var(--card); padding:8px 8px 8px 14px; display:flex; flex-direction:column; gap:6px; }
+  .line { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; flex:none; background:var(--idle); }
+  .dot.ok { background:var(--go); } .dot.bad { background:var(--bad); } .dot.busy { background:var(--busy); }
+  .who { flex:1; min-width:0; }
+  .who > b { display:block; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .st { font-size:13px; color:var(--muted); overflow-wrap:anywhere; }
+  .st b { color:var(--text); }
+  .pc .buy { min-width:84px; }
+  .pc .rc, .pc .rm { display:inline-flex; align-items:center; gap:6px; padding:0 12px; }
+  .pc .rm { background:transparent; color:var(--bad); border-color:var(--rmline); }
+  .items { display:flex; flex-wrap:wrap; gap:4px; padding-left:20px; }
+  .items:empty { display:none; }
+  .items span { display:inline-flex; align-items:center; gap:5px; background:var(--chip); border-radius:999px; padding:2px 9px; font-size:12px; line-height:18px; }
+  .items img { width:18px; height:18px; object-fit:contain; margin-left:-5px; }
+  .res { padding-left:20px; font-size:13px; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; }
+  .res:empty { display:none; }
+  .res.clamp { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; cursor:pointer; }
+  .empty { padding:14px; margin-bottom:12px; }
+  /* bottom: add, share, options */
+  .foot { padding:10px; display:flex; flex-direction:column; gap:8px; }
+  .acts { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:8px; }
+  .acts button { min-height:56px; padding:0 4px; border-radius:12px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; font-size:13px; }
+  .acts button[aria-expanded="true"] { border-color:var(--ok); }
+  .acts .icon { width:18px; height:18px; }
+  .panel { display:flex; flex-direction:column; gap:8px; }
+  .panel p { margin:0; }
+  .two { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:8px; }
+  #listres, #pairres, #shareres { padding:0 4px; font-size:13px; white-space:pre-wrap; }
+  #listres:empty, #pairres:empty, #shareres:empty { display:none; }
+  textarea { font:inherit; font-size:14px; width:100%; min-height:64px; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); resize:vertical; }
+  .opts { display:flex; flex-direction:column; align-items:flex-start; padding:4px 4px 0; border-top:1px solid var(--chip); }
+  .opts label { display:flex; align-items:center; gap:8px; min-height:36px; font-size:14px; color:var(--muted); }
+  .opts input { width:18px; height:18px; margin:0; accent-color:var(--go); }
+  button.link { min-height:36px; padding:0 4px; border:0; background:transparent; color:var(--muted); font-weight:400; font-size:13px; text-decoration:underline; }
+  #about { margin:0; padding:0 4px 2px; font-size:12px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>🛒 MG Buy <small>MG Lategame Helper · 0.19.3</small></h1>
+  <div class="top">
+    <div class="bar">
+      <h1>🛒 MG Buy</h1><small title="MG Lategame Helper">0.24.0</small>
+      <span id="restock" class="pill" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span id="restocktxt"></span></span>
+    </div>
+    <section class="card allbar" id="all" hidden>
+      <div><b id="allstate"></b><div id="allsub" class="muted"></div></div>
+      <button id="buyall" type="button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2l2.4 11.2a1 1 0 0 0 1 .8h9.2a1 1 0 0 0 1-.8L20 8H6.2"/></svg>Buy on all</button>
+    </section>
+    <div id="allres" class="muted" role="status"></div>
+    <div id="relaynote" class="bad" role="status"></div>
+  </div>
   <div id="note" class="muted"></div>
-  <section class="card" id="all" hidden>
-    <div id="allstate" class="state"></div>
-    <button id="buyall" class="go" disabled>Buy on all</button>
-    <div id="allres" class="res muted"></div>
-  </section>
   <div id="pcs"></div>
-  <section class="card">
-    <details id="pair"><summary>Add or share codes</summary>
-      <p class="muted">Paste one or more links or codes (from the game on a PC: Settings → 📱 Phone remote → "Copy phone link"<span class="pools">, or someone's "Buy-only link"</span>). Opening such a link adds them too. Codes stay on this phone: they're after the # in the link, which isn't sent to the website.</p>
+  <section class="card foot">
+    <div class="acts">
+      <button id="addlist" type="button" class="pools" title="Adds the Buy-only links in buy-links.txt, kept next to this page in the mod's GitHub repo"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/></svg>Add everyone</button>
+      <button id="addtoggle" type="button" aria-expanded="false" aria-controls="pair"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add a code</button>
+      <button id="sharetoggle" type="button" aria-expanded="false" aria-controls="sharebox"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>Share</button>
+    </div>
+    <div id="listres" class="muted pools" role="status"></div>
+    <div id="pair" class="panel" hidden>
+      <label for="codes" class="muted">Paste one or more links or codes (from the game on a PC: Settings → 📱 Phone remote → "Copy phone link"<span class="pools">, or someone's "Buy-only link"</span>). Opening such a link adds them too. Codes stay on this phone: they're after the # in the link, which isn't sent to the website.</label>
       <textarea id="codes" placeholder="mglh-… (one or more)" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
-      <button id="add">Add</button>
-      <div class="two"><button id="share" class="pools">Share Buy-only link</button><button id="copyall">Copy full link</button></div>
+      <button id="add" type="button" class="go">Add</button>
+      <div id="pairres" class="muted" role="status"></div>
+    </div>
+    <div id="sharebox" class="panel" hidden>
+      <div class="two"><button id="share" type="button" class="pools">Buy-only link</button><button id="copyall" type="button">Full link</button></div>
       <p class="muted pools">The Buy-only link lets whoever opens it press Buy on these PCs (only on the ones whose owner switched sharing on) and see what's to buy there; it can't be turned into your pairing codes.</p>
       <p class="muted">The full link is for your own devices only: it can also Reconnect your PCs.</p>
-      <div id="pairres" class="res muted"></div>
-    </details>
-    <label class="opt"><input type="checkbox" id="pics"> Show item pictures</label>
+      <div id="shareres" class="muted" role="status"></div>
+    </div>
+    <div class="opts">
+      <label><input type="checkbox" id="pics"> Item pictures</label>
+      <label><input type="checkbox" id="hideidle"> Hide PCs with nothing to buy</label>
+      <label><input type="checkbox" id="hidedown"> Hide PCs that are down</label>
+      <button id="abouttoggle" type="button" class="link" aria-expanded="false" aria-controls="about">About this page</button>
+    </div>
+    <p id="about" class="muted" hidden>This page presses Buy everything on a PC, with the same list and checks as pressing Buy there; it never connects to the game itself, so nothing gets disconnected. Messages go through public MQTT relay servers (HiveMQ and EMQX), encrypted with keys made from the codes.</p>
   </section>
-  <p class="muted">This page presses Buy everything on a PC, with the same list and checks as pressing Buy there; it never connects to the game itself, so nothing gets disconnected. Messages go through public MQTT relay servers (HiveMQ and EMQX), encrypted with keys made from the codes.</p>
 </main>
 <script>
 'use strict';
@@ -335,6 +396,9 @@ const relay = {
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const store = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
   const showPics = () => store.get('mglhRemotePics', '1') !== '0';
+  // hide rows: PCs with nothing to buy (for you), and PCs that are down; both off until switched on
+  const hideIdle = () => store.get('mglhRemoteHideIdle', '0') === '1';
+  const hideDown = () => store.get('mglhRemoteHideDown', '0') === '1';
   // the saved codes (older versions kept one, under mglhRemoteCode)
   let codes = []; try { codes = JSON.parse(store.get('mglhRemoteCodes', '[]')); } catch {}
   if (!Array.isArray(codes)) codes = [];
@@ -356,30 +420,50 @@ const relay = {
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
   const num = (x) => (Number.isFinite(+x) ? +x : 0);
-  let session = null, linkSince = Date.now(), pcs = [];
+  let session = null, linkSince = Date.now(), pcs = [], editing = false;
   const linked = () => session?.connected > 0;
   const isFresh = (e) => { const hb = e.hb; return !!hb && !hb.off && Date.now() - hb.base < (hb.units ? 150000 : Math.max(150000, ((hb.next ?? 300) + 90) * 1000, 450000)); };
   const canBuy = (e) => linked() && isFresh(e) && e.hb.ok && !e.hb.busy && num(e.hb.units) > 0 && !e.pending && !(e.doneAt && e.hb.recv < e.doneAt);
   const send = (e, obj) => !!session?.send(obj, { code: e.code });
-  // one card per PC
+  const ICON_RC = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-3"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3"/><path d="M20 20v-4h-4"/></svg>';
+  const ICON_X = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  // the add, share and about panels under the list
+  const setPanel = (id, open) => { const p = $(id); if (!p) return; p.hidden = !open; document.querySelector(`[aria-controls="${id}"]`)?.setAttribute('aria-expanded', String(open)); };
+  // one row per PC, in two groups: your own PCs, then the ones shared with you (Buy-only)
+  let groupEls = [];
   const build = () => {
-    $('pcs').innerHTML = '';
-    pcs.forEach((e, i) => {
-      const el = document.createElement('section'); el.className = 'card';
-      el.innerHTML = `<div class="head"><b></b><span class="tag">${e.own ? 'yours' : 'Buy-only'}</span><button class="x" title="Remove this PC from this phone">✕</button></div><div class="state">Loading…</div><div class="items"></div><button class="go">Buy on PC</button>${e.own ? '<button class="rc">Reconnect PC</button>' : ''}<div class="res muted"></div>`;
-      e.el = { root: el, name: el.querySelector('b'), state: el.querySelector('.state'), items: el.querySelector('.items'), buy: el.querySelector('button.go'), rc: el.querySelector('button.rc'), res: el.querySelector('.res') };
-      e.index = i;
-      e.el.buy.onclick = () => command(e, 'buy');
-      if (e.el.rc) e.el.rc.onclick = () => { if (confirm('Reload the game on this PC to reconnect it?')) command(e, 'reconnect'); };
-      el.querySelector('button.x').onclick = () => {
-        if (!confirm('Remove this PC from this phone? (You can add it again by pasting its link under "Add or share codes".)')) return;
-        codes = codes.filter((c) => c !== e.code && c !== e.share);
-        removed = [...removed.filter((c) => c !== e.code && c !== e.share), e.code, ...(e.share && e.share !== e.code ? [e.share] : [])];
-        saveCodes(); saveRemoved(); connect();
-      };
-      $('pcs').appendChild(el);
+    $('pcs').innerHTML = ''; groupEls = [];
+    const groups = [['Your PCs', pcs.filter((e) => e.own)], ['Shared with you', pcs.filter((e) => !e.own)]].filter(([, list]) => list.length);
+    groups.forEach(([title, list], gi) => {
+      const sec = document.createElement('section'); sec.className = 'sec';
+      sec.innerHTML = `<div class="sechd"><span>${esc(title)} · ${list.length}</span>${gi === 0 ? '<button type="button" class="edit"></button>' : ''}</div><div class="list"></div>`;
+      list.forEach((e) => {
+        // laid out again (a PC removed, or a second code for the same PC dropped): keep the result line it showed
+        const prevRes = e.el?.res?.innerHTML ?? '';
+        e.lastItems = null; e.lastSt = null;
+        const el = document.createElement('div'); el.className = 'pc';
+        el.innerHTML = `<div class="line"><span class="dot" aria-hidden="true"></span><div class="who"><b></b><div class="st">Loading…</div></div><button type="button" class="buy">Buy</button>${e.own ? `<button type="button" class="rc" hidden>${ICON_RC}Reconnect</button>` : ''}<button type="button" class="rm" hidden>${ICON_X}Remove</button></div><div class="items"></div><div class="res clamp"></div>`;
+        e.el = { root: el, dot: el.querySelector('.dot'), name: el.querySelector('b'), state: el.querySelector('.st'), items: el.querySelector('.items'), buy: el.querySelector('button.buy'), rc: el.querySelector('button.rc'), rm: el.querySelector('button.rm'), res: el.querySelector('.res') };
+        e.el.res.innerHTML = prevRes;
+        e.el.buy.onclick = () => command(e, 'buy');
+        if (e.el.rc) e.el.rc.onclick = () => { if (confirm('Reload the game on this PC to reconnect it?')) command(e, 'reconnect'); };
+        // a long result shows two lines; tap it for the rest
+        e.el.res.onclick = () => e.el.res.classList.toggle('clamp');
+        e.el.rm.onclick = () => {
+          if (!confirm('Remove this PC from this phone? (You can add it again by pasting its link under "Add a code".)')) return;
+          codes = codes.filter((c) => c !== e.code && c !== e.share);
+          removed = [...removed.filter((c) => c !== e.code && c !== e.share), e.code, ...(e.share && e.share !== e.code ? [e.share] : [])];
+          saveCodes(); saveRemoved(); connect();
+        };
+        sec.querySelector('.list').appendChild(el);
+      });
+      $('pcs').appendChild(sec);
+      groupEls.push({ title, list, head: sec.querySelector('.sechd span'), box: sec.querySelector('.list') });
     });
-    $('pair').open = !pcs.length;
+    const edit = $('pcs').querySelector('button.edit');
+    if (edit) edit.onclick = () => { editing = !editing; pcs.forEach((e) => { e.lastItems = null; }); draw(); };
+    pcs.forEach((e, i) => { e.index = i; });
+    if (!pcs.length) { editing = false; setPanel('pair', true); }
   };
   const drawOne = (e) => {
     const hb = e.hb, fresh = isFresh(e);
@@ -387,34 +471,65 @@ const relay = {
     // the PC sends the new stock by itself after a restock; ask only if it hasn't come 20 s later
     if (fresh && left != null && left <= -20 && Date.now() - e.askedAt > 60000) { e.askedAt = Date.now(); send(e, { t: 'ping' }); }
     e.el.name.textContent = hb?.name || `PC ${e.index + 1}`;
-    e.el.state.innerHTML = !linked() && Date.now() - linkSince > 8000 ? '<span class="bad">Can\'t reach the relay servers.</span> <span class="muted">Check this phone\'s internet; it keeps retrying.</span>'
-      : !hb ? (linked() ? `Waiting for this PC… <span class="muted">${e.own ? '(game open on it, with Settings → 📱 Phone remote on, mod 0.18.0 or newer?)' : '(game open on it, with "Let people with my Buy-only link press Buy" on?)'}</span>` : 'Connecting…')
-      : hb.replaced ? `<span class="bad">Old code</span>: it was replaced by a new one on this PC (New code). <span class="muted">Open the new link from the PC, then remove this one (✕).</span>`
-      : hb.off ? `<span class="bad">PC offline</span>: ${esc(hb.why || 'the game tab closed')}.`
-      : !fresh ? `<span class="bad">No word from this PC</span> since ${ago(hb.base)}. <span class="muted">It may be off, asleep, or the game tab closed.</span>`
-      : hb.ok ? `<span class="ok">PC connected</span> · ${hb.busy ? 'buying…' : num(hb.units) ? `<b>${num(hb.units)}</b> to buy` : 'nothing to buy'}${left != null ? (left > 0 ? ` · next restock in ${mmss(left)}` : ' · restocking…') : ''}${!e.own && hb.share === false ? ' · <span class="bad">not taking Buy from shared links</span>' : ''}`
-      : `<span class="bad">PC's game disconnected</span>: ${esc(hb.why)}`;
+    let dot = '', st, tip = '';
+    if (!linked()) st = Date.now() - linkSince > 8000 ? '<span class="bad">Can\'t reach the relay servers</span>' : 'Connecting…';
+    else if (!hb) { st = `Waiting for this PC… (is its game open${e.own ? ', with 📱 Phone remote on' : ', with sharing on'}?)`; tip = e.own ? 'The game open on that PC, with Settings → 📱 Phone remote on (mod 0.18.0 or newer).' : 'The game open on that PC, with "Let people with my Buy-only link press Buy" on.'; }
+    else if (hb.replaced) { dot = 'bad'; st = '<span class="bad">Old code</span>: it was replaced by a new one on this PC (New code). Open the new link from the PC, then remove this one.'; }
+    else if (hb.off) st = `PC offline: ${esc(hb.why || 'the game tab closed')}`;
+    else if (!fresh) { st = `No word since ${ago(hb.base)}`; tip = 'It may be off, asleep, or the game tab closed.'; }
+    else if (hb.ok) {
+      dot = hb.busy || e.pending ? 'busy' : 'ok';
+      st = (hb.busy ? 'Buying…' : num(hb.units) ? `<b>${num(hb.units)}</b> to buy` : 'Nothing to buy') + (!e.own && hb.share === false ? ' · <span class="bad">not taking Buy from shared links</span>' : '');
+    } else { dot = 'bad'; st = `<span class="bad">Game disconnected</span>: ${esc(hb.why)}`; }
+    e.el.dot.className = 'dot' + (dot ? ' ' + dot : '');
+    if (st !== e.lastSt) { e.lastSt = st; e.el.state.innerHTML = st; }
+    e.el.state.title = tip;
     const pics = showPics();
-    const items = fresh && hb.ok && Array.isArray(hb.items) ? hb.items.slice(0, 40) : [];
+    const items = !editing && fresh && hb.ok && Array.isArray(hb.items) ? hb.items.slice(0, 40) : [];
     // the list is only redrawn when it changes (redrawing every second made the pictures flicker)
     const html = items.map((it) => { const [n, q, img] = Array.isArray(it) ? it : []; const ok = pics && typeof img === 'string' && /^[\w\-/.%]+\.(png|webp|jpe?g|gif)$/.test(img) && !img.includes('..'); return `<span>${ok ? `<img src="https://mg-api.ariedam.fr/assets/sprites/${esc(img)}" alt="" onerror="this.remove()">` : ''}${esc(n)} ×${esc(num(q))}</span>`; }).join('');
     if (html !== e.lastItems) { e.lastItems = html; e.el.items.innerHTML = html; }
     const can = canBuy(e);
+    // your own PC whose game is disconnected: Reconnect takes the Buy button's place
+    const showRc = !!e.el.rc && linked() && fresh && !hb.ok;
+    e.el.buy.hidden = editing || showRc;
     e.el.buy.disabled = !can;
     e.el.buy.classList.toggle('ready', can);
-    e.el.buy.textContent = fresh && hb.ok && num(hb.units) ? `Buy on PC (${num(hb.units)})` : 'Buy on PC';
-    if (e.el.rc) e.el.rc.disabled = !(linked() && fresh && !hb.ok) || !!e.pending;
+    e.el.buy.textContent = fresh && hb.ok && num(hb.units) ? `Buy ${num(hb.units)}` : 'Buy';
+    e.el.buy.title = `Buy on ${e.el.name.textContent}`;
+    if (e.el.rc) { e.el.rc.hidden = editing || !showRc; e.el.rc.disabled = !!e.pending; }
+    e.el.rm.hidden = !editing;
+    // Hiding (the two switches under the list). Never while editing (so a hidden PC can be removed), while this phone
+    // can't reach the relay (that's the phone, not the PCs), in the first 10 s (statuses still coming in), while a
+    // command is out or for a minute after its answer, or your own PC with Reconnect showing.
+    const down = !hb ? Date.now() - linkSince > 10000 : !!(hb.replaced || hb.off || !fresh || !hb.ok);
+    const idle = !down && !!hb && !hb.busy && (!num(hb.units) || (!e.own && hb.share === false));
+    const keep = editing || !linked() || !!e.pending || Date.now() - (e.resAt || 0) < 60000 || showRc;
+    e.el.root.hidden = !keep && ((hideIdle() && idle) || (hideDown() && down));
     if (e.last && !e.pending && !e.mine) e.el.res.textContent = `Last buy, ${ago(e.last.at)}: ${String(e.last.text ?? '')}`;
   };
   const draw = () => {
     pcs.forEach(drawOne);
-    if (!pcs.length) { $('pcs').innerHTML = '<section class="card">Not paired yet: open the link from your PC, or add a code below.</section>'; }
+    if (!pcs.length) { $('pcs').innerHTML = '<section class="card empty">Not paired yet: open the link from your PC, or add a code below.</section>'; }
     const ready = pcs.filter(canBuy), units = ready.reduce((a, e) => a + num(e.hb.units), 0);
     $('all').hidden = pcs.length < 2;
-    $('allstate').innerHTML = `${pcs.filter((e) => isFresh(e) && e.hb.ok).length} of ${pcs.length} PCs connected${ready.length ? ` · <b>${units}</b> to buy on ${ready.length}` : ' · nothing to buy'}`;
+    $('allstate').textContent = units ? `${units} to buy on ${ready.length} PC${ready.length === 1 ? '' : 's'}` : 'Nothing to buy';
+    $('allsub').textContent = `${pcs.filter((e) => isFresh(e) && e.hb.ok).length} of ${pcs.length} PCs connected`;
     $('buyall').disabled = !ready.length;
     $('buyall').classList.toggle('ready', ready.length > 0);
-    $('buyall').textContent = ready.length ? `Buy on all (${ready.length} PC${ready.length === 1 ? '' : 's'})` : 'Buy on all';
+    // the next restock: shops restock on the 5-minute mark for everyone, so every connected PC sends the same countdown
+    // (the game's own); the soonest is taken in case one is a moment behind
+    const lefts = pcs.filter((e) => isFresh(e) && e.hb.ok && e.hb.next != null).map((e) => num(e.hb.next) - (Date.now() - e.hb.base) / 1000);
+    $('restock').hidden = !lefts.length;
+    if (lefts.length) { const l = Math.min(...lefts); $('restocktxt').textContent = l > 0 ? `Restock ${mmss(l)}` : 'Restocking…'; }
+    $('relaynote').textContent = pcs.length && !linked() && Date.now() - linkSince > 8000 ? 'Can\'t reach the relay servers. Check this phone\'s internet; it keeps retrying.' : '';
+    const edit = $('pcs').querySelector('button.edit'); if (edit) edit.textContent = editing ? 'Done' : 'Edit';
+    // each group says how many of its PCs are hidden; a group with all of them hidden shows only its header
+    for (const g of groupEls) {
+      const hid = g.list.filter((e) => e.el.root.hidden).length;
+      g.head.textContent = `${g.title} · ${g.list.length}${hid ? ` · ${hid} hidden` : ''}`;
+      g.box.hidden = hid === g.list.length;
+    }
     // something to buy: the button pulses (like the 🛒 button in the game) and the tab title shows the count
     document.title = units ? `🛒 ${units} to buy · MG Buy` : 'MG Buy';
   };
@@ -427,7 +542,7 @@ const relay = {
     } else if (part === '/r' && m.t === 'last' && via === 'o' && m.res) {
       e.last = { at: num(m.res.at), text: String(m.res.text ?? '').slice(0, 900) };
     } else if (part === '/m' && m.t === 'res' && e.pending && m.re === e.pending) {
-      e.mine = true;
+      e.mine = true; e.resAt = Date.now();
       e.el.res.innerHTML = m.ok ? esc(m.text) : `<span class="bad">${esc(m.text)}</span>`;
       if (!m.partial) {
         e.pending = null; clearTimeout(e.timer);
@@ -437,7 +552,7 @@ const relay = {
     drawOne(e); draw();
   };
   // The same PC under two codes (an old one from before "New code", or its pairing code and someone's Buy-only link):
-  // each PC sends a random id of its own, so keep one card per PC: the live code, your own code over a Buy-only one,
+  // each PC sends a random id of its own, so keep one row per PC: the live code, your own code over a Buy-only one,
   // the newest status. The others are removed from this phone.
   const dedupe = () => {
     const byPc = new Map();
@@ -454,10 +569,10 @@ const relay = {
     codes = codes.filter((c) => !drop.some((e) => e.code === c));
     saveCodes();
     pcs = pcs.filter((e) => !gone.has(e));
-    drop.forEach((e) => { clearTimeout(e.timer); e.el.root.remove(); });
-    pcs.forEach((e, i) => { e.index = i; });
+    drop.forEach((e) => { clearTimeout(e.timer); });
     $('note').textContent = `Removed ${drop.length === 1 ? 'a second code' : `${drop.length} extra codes`} for the same PC (${drop.map((e) => e.hb.name || 'unnamed').join(', ')}).`;
-    draw();
+    // the groups' counts change, so the rows are laid out again (keeping what each PC already showed)
+    build(); draw();
     return true;
   };
   const command = (e, t) => {
@@ -477,13 +592,21 @@ const relay = {
     const shares = new Set(codes.filter(relay.valid).map((c) => shareOf.get(c)));
     const list = codes.filter((c) => !(relay.validShare(c) && shares.has(c)));
     if (list.length !== codes.length) { codes = list; saveCodes(); }
-    pcs = list.map((code) => ({ code, share: shareOf.get(code), own: relay.valid(code), hb: null, last: null, pending: null, pendingCmd: null, timer: null, doneAt: 0, askedAt: 0, mine: false, lastItems: null }));
+    pcs = list.map((code) => ({ code, share: shareOf.get(code), own: relay.valid(code), hb: null, last: null, pending: null, pendingCmd: null, timer: null, doneAt: 0, askedAt: 0, mine: false, lastItems: null, lastSt: null }));
     build(); draw();
     if (!pcs.length) return;
     let asked = false;
     session = relay.connect(list, { onMsg, onState: (n) => { if (n && !asked) { asked = true; setTimeout(() => pcs.forEach((e) => send(e, { t: 'ping' })), 300); } draw(); } });
   };
-  $('buyall').onclick = () => { const ready = pcs.filter(canBuy); const sent = ready.filter((e) => command(e, 'buy')).length; $('allres').textContent = `Sent Buy to ${sent} PC${sent === 1 ? '' : 's'}.`; };
+  let allTimer = 0;
+  $('buyall').onclick = () => {
+    const ready = pcs.filter(canBuy); const sent = ready.filter((e) => command(e, 'buy')).length;
+    $('allres').textContent = `Sent Buy to ${sent} PC${sent === 1 ? '' : 's'}.`;
+    clearTimeout(allTimer); allTimer = setTimeout(() => { $('allres').textContent = ''; }, 8000);
+  };
+  $('addtoggle').onclick = () => setPanel('pair', $('pair').hidden);
+  $('sharetoggle').onclick = () => setPanel('sharebox', $('sharebox').hidden);
+  $('abouttoggle').onclick = () => setPanel('about', $('about').hidden);
   $('add').onclick = async () => {
     const found = relay.findCodes($('codes').value).filter(usable);
     if (!found.length) { $('pairres').innerHTML = `<span class="bad">No codes in there (they start with ${POOLS ? 'mglh- or mglhs-' : 'mglh-'}).</span>`; return; }
@@ -496,9 +619,50 @@ const relay = {
     $('codes').value = ''; $('pairres').textContent = `Added ${added.length} code${added.length === 1 ? '' : 's'}${found.length > added.length ? ` (${found.length - added.length} already here)` : ''}.`;
     connect();
   };
+  // 👥 Everyone's Buy-only links, from a list kept next to this page in the mod's repo (buy-links.txt; GitHub's raw copy
+  // if that can't be read). Only Buy-only codes are taken from it: the file is public, and a pairing code in it would let
+  // anyone Reconnect that PC, so those are left out. Lines starting with # or // are skipped. PCs you removed from this
+  // phone stay removed unless you press "Add … too". The list only adds: a PC taken off it stays here until you remove it.
+  const LIST_FILE = 'buy-links.txt';
+  const LIST_RAW = 'https://raw.githubusercontent.com/godgamerover9k/MG-late-game-helper/main/' + LIST_FILE;
+  const LIST_MAX = 60;
+  const fetchList = async () => {
+    const urls = [...(/^https?:$/.test(location.protocol) ? [new URL(LIST_FILE, location.href).href] : []), LIST_RAW];
+    for (const u of urls) {
+      try { const r = await fetch(`${u}?t=${Date.now()}`, { cache: 'no-store' }); if (r.ok) return await r.text(); } catch {}
+    }
+    return null;
+  };
+  ($('addlist') || {}).onclick = async () => {
+    const btn = $('addlist'), res = $('listres');
+    btn.disabled = true; res.textContent = 'Getting the list…';
+    try {
+      const text = await fetchList();
+      if (text == null) { res.innerHTML = '<span class="bad">Couldn\'t get the list.</span> Check this phone\'s internet and try again.'; return; }
+      const found = relay.findCodes(String(text).split(/\r?\n/).filter((l) => !/^\s*(#|\/\/)/.test(l)).join('\n'));
+      const pairing = found.filter(relay.valid).length;
+      const onList = found.filter(relay.validShare);
+      const list = onList.slice(0, LIST_MAX);
+      if (!list.length) { res.innerHTML = `The list has no Buy-only links yet.${pairing ? ' <span class="bad">It has a pairing code (mglh-…), which is never taken from the list.</span>' : ''}`; return; }
+      // already here: the same code, or the Buy-only code of a PC whose pairing code is here
+      const here = new Set(codes);
+      for (const c of codes) if (relay.valid(c)) here.add(await relay.shareOf(c));
+      const fresh = list.filter((c) => !here.has(c));
+      const back = fresh.filter((c) => removed.includes(c));
+      const added = fresh.filter((c) => !removed.includes(c));
+      if (added.length) { codes.push(...added); saveCodes(); connect(); }
+      const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+      let html = esc(`${n(list.length, 'PC', 'PCs')} on the list: added ${added.length}${list.length - fresh.length ? `, ${list.length - fresh.length} already here` : ''}.`);
+      if (onList.length > LIST_MAX) html += esc(` Only the first ${LIST_MAX} were taken.`);
+      if (back.length) html += ` ${esc(`${n(back.length, 'PC', 'PCs')} you removed from this phone ${back.length === 1 ? 'was' : 'were'} not added back.`)} <button id="listback" type="button" style="min-height:36px;margin-top:6px">Add ${back.length === 1 ? 'it' : 'them'} too</button>`;
+      if (pairing) html += ` <span class="bad">${esc(`The list has ${n(pairing, 'pairing code', 'pairing codes')} (mglh-…), which ${pairing === 1 ? 'is' : 'are'} never taken from the list.`)}</span>`;
+      res.innerHTML = html;
+      if (back.length) $('listback').onclick = () => { codes.push(...back.filter((c) => !codes.includes(c))); removed = removed.filter((c) => !back.includes(c)); saveCodes(); saveRemoved(); res.textContent = `Added ${back.length} more.`; connect(); };
+    } finally { btn.disabled = false; }
+  };
   const giveLink = async (link, what) => {
     try { if (navigator.share) { await navigator.share({ title: 'MG Buy', url: link }); return; } } catch (err) { if (err?.name === 'AbortError') return; }
-    try { await navigator.clipboard.writeText(link); $('pairres').textContent = `${what} copied.`; } catch { prompt(what + ':', link); }
+    try { await navigator.clipboard.writeText(link); $('shareres').textContent = `${what} copied.`; } catch { prompt(what + ':', link); }
   };
   const base = () => location.origin + location.pathname;
   ($('share') || {}).onclick = async () => {
@@ -512,11 +676,15 @@ const relay = {
     giveLink(`${base()}#${pcs.map((e) => e.code).join(',')}`, 'Full link');
   };
   if (skipped.length) {
-    $('note').innerHTML = `This link has ${skipped.length === 1 ? 'a PC' : `${skipped.length} PCs`} you removed from this phone, so ${skipped.length === 1 ? 'it wasn\'t' : 'they weren\'t'} added back. <button id="addback" style="width:auto;min-height:36px;padding:0 12px;margin:6px 0 0">Add back</button>`;
+    $('note').innerHTML = `This link has ${skipped.length === 1 ? 'a PC' : `${skipped.length} PCs`} you removed from this phone, so ${skipped.length === 1 ? 'it wasn\'t' : 'they weren\'t'} added back. <button id="addback" type="button" style="min-height:36px;margin-top:6px">Add back</button>`;
     $('addback').onclick = () => { codes.push(...skipped.filter((c) => !codes.includes(c))); removed = removed.filter((c) => !skipped.includes(c)); skipped = []; saveCodes(); saveRemoved(); $('note').textContent = ''; connect(); };
   }
   $('pics').checked = showPics();
   $('pics').onchange = () => { store.set('mglhRemotePics', $('pics').checked ? '1' : '0'); pcs.forEach((e) => { e.lastItems = null; }); draw(); };
+  $('hideidle').checked = hideIdle();
+  $('hideidle').onchange = () => { store.set('mglhRemoteHideIdle', $('hideidle').checked ? '1' : '0'); draw(); };
+  $('hidedown').checked = hideDown();
+  $('hidedown').onchange = () => { store.set('mglhRemoteHideDown', $('hidedown').checked ? '1' : '0'); draw(); };
   // Back on the page after the phone slept, or back online: drop a dead connection right away and ask for fresh status
   let lastWake = 0;
   const wake = () => {
